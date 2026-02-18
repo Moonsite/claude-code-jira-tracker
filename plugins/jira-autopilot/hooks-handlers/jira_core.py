@@ -303,8 +303,185 @@ def cmd_log_activity(args):
     )
 
 
+def _get_idle_threshold_seconds(cfg: dict) -> int:
+    """Get idle threshold in seconds, scaled by accuracy."""
+    accuracy = cfg.get("accuracy", 5)
+    base = cfg.get("idleThreshold", 15)
+    # High accuracy (8-10) → shorter threshold; low (1-3) → longer
+    if accuracy >= 8:
+        minutes = max(base // 3, 5)
+    elif accuracy <= 3:
+        minutes = base * 2
+    else:
+        minutes = base
+    return minutes * 60
+
+
+def _get_dir_cluster(file_path: str, depth: int = 2) -> str:
+    """Extract directory cluster from file path up to given depth."""
+    if not file_path:
+        return ""
+    parts = file_path.replace("\\", "/").split("/")
+    # Return up to `depth` directory components
+    dirs = [p for p in parts[:-1] if p]  # exclude filename
+    return "/".join(dirs[:depth]) if dirs else ""
+
+
+def _detect_context_switch(prev_activities: list, curr_activities: list,
+                           accuracy: int) -> bool:
+    """Check if file directory clusters shifted between two groups."""
+    if not prev_activities or not curr_activities:
+        return False
+
+    prev_dirs = Counter(
+        _get_dir_cluster(a.get("file", ""))
+        for a in prev_activities if a.get("file")
+    )
+    curr_dirs = Counter(
+        _get_dir_cluster(a.get("file", ""))
+        for a in curr_activities if a.get("file")
+    )
+    if not prev_dirs or not curr_dirs:
+        return False
+
+    # Check overlap: if most common dirs differ, it's a switch
+    prev_top = set(d for d, _ in prev_dirs.most_common(2))
+    curr_top = set(d for d, _ in curr_dirs.most_common(2))
+    overlap = prev_top & curr_top
+
+    # High accuracy → any cluster change flags; low → need complete shift
+    if accuracy >= 8:
+        return len(overlap) == 0
+    elif accuracy >= 4:
+        return len(overlap) == 0 and len(prev_top) > 0 and len(curr_top) > 0
+    else:
+        # Low accuracy: only flag if completely different and enough activities
+        return (len(overlap) == 0 and len(prev_activities) >= 3
+                and len(curr_activities) >= 3)
+
+
+def cmd_drain_buffer(args):
+    root = args[0] if args else "."
+    cfg = load_config(root)
+    session = load_session(root)
+    if not session:
+        return
+
+    buffer = session.get("activityBuffer", [])
+    if not buffer:
+        return
+
+    idle_threshold = _get_idle_threshold_seconds(cfg)
+    accuracy = cfg.get("accuracy", 5)
+    chunks = session.get("workChunks", [])
+
+    # Sort buffer by timestamp
+    buffer.sort(key=lambda a: a.get("timestamp", 0))
+
+    # Split buffer into groups on: idle gaps, issue key changes, dir cluster shifts
+    groups = []
+    current_group = [buffer[0]]
+
+    for i in range(1, len(buffer)):
+        prev = buffer[i - 1]
+        curr = buffer[i]
+        gap = curr.get("timestamp", 0) - prev.get("timestamp", 0)
+        issue_changed = curr.get("issueKey") != prev.get("issueKey")
+
+        # Detect directory cluster shift
+        dir_shift = False
+        prev_dir = _get_dir_cluster(prev.get("file", ""))
+        curr_dir = _get_dir_cluster(curr.get("file", ""))
+        if prev_dir and curr_dir and prev_dir != curr_dir:
+            # Check if there's been a sustained shift (look back at recent group)
+            recent_dirs = Counter(
+                _get_dir_cluster(a.get("file", ""))
+                for a in current_group if a.get("file")
+            )
+            if curr_dir not in recent_dirs and len(current_group) >= 2:
+                dir_shift = True
+
+        if gap > idle_threshold or issue_changed or dir_shift:
+            groups.append({
+                "activities": current_group,
+                "idle_before": gap > idle_threshold,
+                "idle_gap_seconds": gap if gap > idle_threshold else 0,
+                "dir_shift": dir_shift,
+            })
+            current_group = [curr]
+        else:
+            current_group.append(curr)
+
+    # Don't forget the last group
+    groups.append({
+        "activities": current_group,
+        "idle_before": False,
+        "idle_gap_seconds": 0,
+        "dir_shift": False,
+    })
+
+    # Convert groups to work chunks
+    for idx, group in enumerate(groups):
+        activities = group["activities"]
+        if not activities:
+            continue
+
+        start_time = activities[0].get("timestamp", 0)
+        end_time = activities[-1].get("timestamp", 0)
+        files_changed = list({
+            a.get("file", "") for a in activities if a.get("file")
+        })
+        issue_key = activities[0].get("issueKey")
+
+        idle_gaps = []
+        if group["idle_before"] and group["idle_gap_seconds"] > 0:
+            idle_gaps.append({
+                "startTime": start_time - group["idle_gap_seconds"],
+                "endTime": start_time,
+                "seconds": group["idle_gap_seconds"],
+            })
+
+        # Check for context switch: either the dir_shift flag or heuristic
+        needs_attribution = group.get("dir_shift", False)
+        if not needs_attribution and idx > 0:
+            prev_activities = groups[idx - 1]["activities"]
+            needs_attribution = _detect_context_switch(
+                prev_activities, activities, accuracy
+            )
+
+        chunk_id = f"chunk-{int(time.time())}-{idx}"
+        chunk = {
+            "id": chunk_id,
+            "issueKey": issue_key,
+            "startTime": start_time,
+            "endTime": end_time,
+            "activities": activities,
+            "filesChanged": files_changed,
+            "idleGaps": idle_gaps,
+            "needsAttribution": needs_attribution,
+        }
+        chunks.append(chunk)
+
+    session["workChunks"] = chunks
+    session["activityBuffer"] = []
+    save_session(root, session)
+
+    debug_log(
+        f"chunks={len(groups)} total_chunks={len(chunks)}",
+        category="drain-buffer",
+        enabled=cfg.get("debugLog", False),
+    )
+
+    # Output context switch info for Claude
+    flagged = [c for c in chunks if c.get("needsAttribution")]
+    if flagged:
+        for c in flagged:
+            files = ", ".join(c.get("filesChanged", [])[:5])
+            print(f"[jira-autopilot] Context switch detected. "
+                  f"Files: {files} → unattributed (issueKey={c['issueKey']})")
+
+
 # Stubs — implemented in subsequent tasks
-def cmd_drain_buffer(args): pass
 def cmd_session_end(args): pass
 def cmd_classify_issue(args): pass
 def cmd_suggest_parent(args): pass

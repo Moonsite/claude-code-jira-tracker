@@ -18,6 +18,7 @@ from jira_core import (
     get_cred,
     cmd_session_start,
     cmd_log_activity,
+    cmd_drain_buffer,
 )
 
 
@@ -268,3 +269,129 @@ class TestLogActivity:
         session = json.loads((tmp_path / ".claude" / SESSION_NAME).read_text())
         assert session["activityBuffer"][0]["file"] == "src/new-file.ts"
         assert session["activityBuffer"][0]["type"] == "file_write"
+
+
+# ── Task 1.4: drain-buffer ───────────────────────────────────────────────
+
+
+class TestDrainBuffer:
+    def _setup(self, tmp_path, accuracy=5, idle_threshold=15):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        (claude_dir / CONFIG_NAME).write_text(json.dumps({
+            "enabled": True, "debugLog": False,
+            "accuracy": accuracy, "idleThreshold": idle_threshold,
+        }))
+        return claude_dir
+
+    def test_detects_idle_gap(self, tmp_path):
+        """Activities with >15min gap should produce chunks with idle marker."""
+        claude_dir = self._setup(tmp_path, accuracy=5, idle_threshold=15)
+        now = int(time.time())
+        session = {
+            "sessionId": "test", "currentIssue": "TEST-1",
+            "activeIssues": {"TEST-1": {"startTime": now - 3600, "totalSeconds": 0}},
+            "activityBuffer": [
+                {"timestamp": now - 3600, "tool": "Edit", "file": "a.ts",
+                 "type": "file_edit", "issueKey": "TEST-1"},
+                {"timestamp": now - 3500, "tool": "Edit", "file": "b.ts",
+                 "type": "file_edit", "issueKey": "TEST-1"},
+                # 20 min gap — idle
+                {"timestamp": now - 2300, "tool": "Edit", "file": "c.ts",
+                 "type": "file_edit", "issueKey": "TEST-1"},
+            ],
+            "workChunks": [],
+        }
+        (claude_dir / SESSION_NAME).write_text(json.dumps(session))
+        cmd_drain_buffer([str(tmp_path)])
+        updated = json.loads((claude_dir / SESSION_NAME).read_text())
+        chunks = updated["workChunks"]
+        assert len(chunks) >= 1
+        has_idle = any(c.get("idleGaps") for c in chunks)
+        assert has_idle
+
+    def test_detects_context_switch(self, tmp_path):
+        """Activities switching file directories should flag needsAttribution."""
+        claude_dir = self._setup(tmp_path, accuracy=7)
+        now = int(time.time())
+        session = {
+            "sessionId": "test", "currentIssue": "TEST-1",
+            "activeIssues": {"TEST-1": {"startTime": now - 600, "totalSeconds": 0}},
+            "activityBuffer": [
+                {"timestamp": now - 600, "tool": "Edit", "file": "src/auth/login.ts",
+                 "type": "file_edit", "issueKey": "TEST-1"},
+                {"timestamp": now - 500, "tool": "Edit", "file": "src/auth/token.ts",
+                 "type": "file_edit", "issueKey": "TEST-1"},
+                {"timestamp": now - 400, "tool": "Edit", "file": "src/payments/stripe.ts",
+                 "type": "file_edit", "issueKey": "TEST-1"},
+                {"timestamp": now - 300, "tool": "Edit", "file": "src/payments/webhook.ts",
+                 "type": "file_edit", "issueKey": "TEST-1"},
+            ],
+            "workChunks": [],
+        }
+        (claude_dir / SESSION_NAME).write_text(json.dumps(session))
+        cmd_drain_buffer([str(tmp_path)])
+        updated = json.loads((claude_dir / SESSION_NAME).read_text())
+        flagged = [c for c in updated["workChunks"] if c.get("needsAttribution")]
+        assert len(flagged) > 0
+
+    def test_clears_activity_buffer(self, tmp_path):
+        """After draining, activityBuffer should be empty."""
+        claude_dir = self._setup(tmp_path)
+        now = int(time.time())
+        session = {
+            "sessionId": "test", "currentIssue": "TEST-1",
+            "activeIssues": {"TEST-1": {"startTime": now - 60, "totalSeconds": 0}},
+            "activityBuffer": [
+                {"timestamp": now - 60, "tool": "Edit", "file": "a.ts",
+                 "type": "file_edit", "issueKey": "TEST-1"},
+            ],
+            "workChunks": [],
+        }
+        (claude_dir / SESSION_NAME).write_text(json.dumps(session))
+        cmd_drain_buffer([str(tmp_path)])
+        updated = json.loads((claude_dir / SESSION_NAME).read_text())
+        assert updated["activityBuffer"] == []
+        assert len(updated["workChunks"]) == 1
+
+    def test_splits_on_issue_key_change(self, tmp_path):
+        """Different issueKeys should produce separate chunks."""
+        claude_dir = self._setup(tmp_path)
+        now = int(time.time())
+        session = {
+            "sessionId": "test", "currentIssue": "TEST-2",
+            "activeIssues": {
+                "TEST-1": {"startTime": now - 600, "totalSeconds": 0},
+                "TEST-2": {"startTime": now - 300, "totalSeconds": 0},
+            },
+            "activityBuffer": [
+                {"timestamp": now - 600, "tool": "Edit", "file": "a.ts",
+                 "type": "file_edit", "issueKey": "TEST-1"},
+                {"timestamp": now - 500, "tool": "Edit", "file": "b.ts",
+                 "type": "file_edit", "issueKey": "TEST-1"},
+                {"timestamp": now - 300, "tool": "Edit", "file": "c.ts",
+                 "type": "file_edit", "issueKey": "TEST-2"},
+            ],
+            "workChunks": [],
+        }
+        (claude_dir / SESSION_NAME).write_text(json.dumps(session))
+        cmd_drain_buffer([str(tmp_path)])
+        updated = json.loads((claude_dir / SESSION_NAME).read_text())
+        chunks = updated["workChunks"]
+        issue_keys = {c["issueKey"] for c in chunks}
+        assert "TEST-1" in issue_keys
+        assert "TEST-2" in issue_keys
+
+    def test_empty_buffer_noop(self, tmp_path):
+        """No activities → no chunks created."""
+        claude_dir = self._setup(tmp_path)
+        session = {
+            "sessionId": "test", "currentIssue": "TEST-1",
+            "activeIssues": {"TEST-1": {"startTime": 1000, "totalSeconds": 0}},
+            "activityBuffer": [],
+            "workChunks": [],
+        }
+        (claude_dir / SESSION_NAME).write_text(json.dumps(session))
+        cmd_drain_buffer([str(tmp_path)])
+        updated = json.loads((claude_dir / SESSION_NAME).read_text())
+        assert updated["workChunks"] == []
