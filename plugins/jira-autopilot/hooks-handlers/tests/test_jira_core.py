@@ -1476,6 +1476,50 @@ class TestSessionEndExtra:
         updated = json.loads((claude_dir / SESSION_NAME).read_text())
         assert updated["pendingWorklogs"] == []
 
+    def test_clears_work_chunks_after_session_end_to_prevent_double_posting(self, tmp_path):
+        """workChunks must be cleared after session-end so a second session-end
+        doesn't re-sum the same chunks and post duplicate Jira worklogs."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / CONFIG_NAME).write_text(json.dumps({
+            "debugLog": False, "accuracy": 5, "timeRounding": 15, "autonomyLevel": "C",
+        }))
+        now = int(time.time())
+        session = {
+            "sessionId": "double-test", "currentIssue": "TEST-1",
+            "autonomyLevel": "C", "accuracy": 5,
+            "activeIssues": {"TEST-1": {"startTime": now - 1800, "totalSeconds": 0, "paused": False}},
+            "workChunks": [{
+                "id": "c1", "issueKey": "TEST-1",
+                "startTime": now - 600, "endTime": now - 300,
+                "filesChanged": ["a.ts"],
+                "activities": [{"tool": "Edit", "type": "file_edit"}],
+                "idleGaps": [],
+            }],
+            "activityBuffer": [],
+            "pendingWorklogs": [],
+        }
+        (claude_dir / SESSION_NAME).write_text(json.dumps(session))
+
+        # First session-end
+        cmd_session_end([str(tmp_path)])
+        after_first = json.loads((claude_dir / SESSION_NAME).read_text())
+        assert len(after_first["pendingWorklogs"]) == 1
+        first_seconds = after_first["pendingWorklogs"][0]["seconds"]
+
+        # workChunks should be cleared — no chunks for TEST-1 remain
+        remaining = [c for c in after_first["workChunks"] if c.get("issueKey") == "TEST-1"]
+        assert remaining == [], "workChunks for TEST-1 must be cleared after session-end"
+
+        # Second session-end on the same (now-cleared) session
+        cmd_session_end([str(tmp_path)])
+        after_second = json.loads((claude_dir / SESSION_NAME).read_text())
+
+        # Should NOT have created a duplicate worklog entry
+        test1_entries = [w for w in after_second["pendingWorklogs"] if w["issueKey"] == "TEST-1"]
+        assert len(test1_entries) == 1, "duplicate worklog created — double-posting bug"
+        assert test1_entries[0]["seconds"] == first_seconds
+
 
 # ── _text_to_adf ─────────────────────────────────────────────────────────
 

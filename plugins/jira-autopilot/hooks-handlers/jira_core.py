@@ -801,6 +801,19 @@ def cmd_session_end(args):
 
     session["pendingWorklogs"] = pending
 
+    # Clear processed work chunks so the next session-end doesn't double-count them.
+    # Keep only chunks that belong to issues not tracked this session (shouldn't exist,
+    # but defensive) and reset each active issue's startTime watermark to now.
+    processed_keys = set(active_issues.keys())
+    session["workChunks"] = [
+        c for c in session.get("workChunks", [])
+        if c.get("issueKey") not in processed_keys
+    ]
+    now = int(time.time())
+    for issue_key in processed_keys:
+        if issue_key in session.get("activeIssues", {}):
+            session["activeIssues"][issue_key]["startTime"] = now
+
     # Archive session
     archive_dir = os.path.join(root, ".claude", "jira-sessions")
     os.makedirs(archive_dir, exist_ok=True)
