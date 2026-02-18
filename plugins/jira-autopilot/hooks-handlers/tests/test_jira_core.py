@@ -16,6 +16,7 @@ from jira_core import (
     load_session,
     save_session,
     get_cred,
+    cmd_session_start,
 )
 
 
@@ -101,3 +102,76 @@ class TestConfigLoading:
 
     def test_get_cred_returns_empty_when_missing(self, tmp_path):
         assert get_cred(str(tmp_path), "nonexistent") == ""
+
+
+# ── Task 1.2: session-start ──────────────────────────────────────────────
+
+
+class TestSessionStart:
+    def _setup_config(self, tmp_path, cfg=None):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(exist_ok=True)
+        default_cfg = {
+            "projectKey": "TEST",
+            "enabled": True,
+            "debugLog": False,
+            "accuracy": 5,
+            "autonomyLevel": "C",
+        }
+        if cfg:
+            default_cfg.update(cfg)
+        (claude_dir / CONFIG_NAME).write_text(json.dumps(default_cfg))
+        return claude_dir
+
+    def test_creates_session(self, tmp_path):
+        self._setup_config(tmp_path)
+        cmd_session_start([str(tmp_path)])
+        session = json.loads((tmp_path / ".claude" / SESSION_NAME).read_text())
+        assert "sessionId" in session
+        assert session["activeIssues"] == {}
+        assert session["currentIssue"] is None
+        assert session["autonomyLevel"] == "C"
+        assert session["accuracy"] == 5
+
+    def test_reads_autonomy_level_from_config(self, tmp_path):
+        self._setup_config(tmp_path, {"autonomyLevel": "A"})
+        cmd_session_start([str(tmp_path)])
+        session = json.loads((tmp_path / ".claude" / SESSION_NAME).read_text())
+        assert session["autonomyLevel"] == "A"
+
+    def test_preserves_existing_session(self, tmp_path):
+        """If session already exists with active issues, don't overwrite."""
+        claude_dir = self._setup_config(tmp_path)
+        existing = {
+            "sessionId": "old-session",
+            "currentIssue": "TEST-5",
+            "activeIssues": {"TEST-5": {"startTime": 1000, "totalSeconds": 300}},
+            "activityBuffer": [],
+            "workChunks": [],
+        }
+        (claude_dir / SESSION_NAME).write_text(json.dumps(existing))
+        cmd_session_start([str(tmp_path)])
+        session = json.loads((claude_dir / SESSION_NAME).read_text())
+        # Should keep active issues
+        assert "TEST-5" in session["activeIssues"]
+
+    def test_migrates_old_config_name(self, tmp_path):
+        """Old jira-tracker.json should be migrated to jira-autopilot.json."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        old_config = {"projectKey": "OLD", "enabled": True}
+        (claude_dir / "jira-tracker.json").write_text(json.dumps(old_config))
+        # No jira-autopilot.json exists yet
+        cmd_session_start([str(tmp_path)])
+        # Should have migrated
+        assert (claude_dir / CONFIG_NAME).exists()
+        cfg = json.loads((claude_dir / CONFIG_NAME).read_text())
+        assert cfg["projectKey"] == "OLD"
+
+    def test_initializes_empty_buffers(self, tmp_path):
+        self._setup_config(tmp_path)
+        cmd_session_start([str(tmp_path)])
+        session = json.loads((tmp_path / ".claude" / SESSION_NAME).read_text())
+        assert session["activityBuffer"] == []
+        assert session["workChunks"] == []
+        assert session["pendingWorklogs"] == []

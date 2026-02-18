@@ -139,8 +139,113 @@ def cmd_debug_log(args):
     debug_log(msg, enabled=cfg.get("debugLog", False))
 
 
+# ── Commands ───────────────────────────────────────────────────────────────
+
+OLD_CONFIG_NAMES = {
+    "jira-tracker.json": CONFIG_NAME,
+    "jira-tracker.local.json": LOCAL_CONFIG_NAME,
+}
+
+
+def _migrate_old_configs(root: str):
+    """Rename old jira-tracker.* config files to jira-autopilot.*."""
+    claude_dir = os.path.join(root, ".claude")
+    if not os.path.isdir(claude_dir):
+        return
+    for old_name, new_name in OLD_CONFIG_NAMES.items():
+        old_path = os.path.join(claude_dir, old_name)
+        new_path = os.path.join(claude_dir, new_name)
+        if os.path.exists(old_path) and not os.path.exists(new_path):
+            os.rename(old_path, new_path)
+            debug_log(f"Migrated {old_name} → {new_name}", category="migration")
+
+
+def _detect_issue_from_branch(root: str, cfg: dict) -> str | None:
+    """Try to extract issue key from current git branch name."""
+    pattern = cfg.get("branchPattern", "")
+    project_key = cfg.get("projectKey", "")
+    if not pattern or not project_key:
+        return None
+    # Replace {key} placeholder with actual project key
+    pattern = pattern.replace("{key}", re.escape(project_key))
+    try:
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, cwd=root, timeout=5,
+        ).stdout.strip()
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+    if not branch:
+        return None
+    m = re.search(pattern, branch)
+    if m and m.groups():
+        return m.group(1)
+    return None
+
+
+def cmd_session_start(args):
+    root = args[0] if args else "."
+    _migrate_old_configs(root)
+
+    cfg = load_config(root)
+    if not cfg.get("enabled", True):
+        return
+
+    existing = load_session(root)
+    # If there's already an active session with issues, preserve it
+    if existing.get("activeIssues"):
+        # Update autonomy/accuracy from config in case it changed
+        existing["autonomyLevel"] = cfg.get("autonomyLevel", "C")
+        existing["accuracy"] = cfg.get("accuracy", 5)
+        save_session(root, existing)
+        debug_log(
+            "Resuming existing session",
+            category="session-start",
+            enabled=cfg.get("debugLog", False),
+            sessionId=existing.get("sessionId", ""),
+        )
+        return
+
+    session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    session = {
+        "sessionId": session_id,
+        "autonomyLevel": cfg.get("autonomyLevel", "C"),
+        "accuracy": cfg.get("accuracy", 5),
+        "disabled": False,
+        "activeIssues": {},
+        "currentIssue": None,
+        "lastParentKey": None,
+        "workChunks": [],
+        "pendingWorklogs": [],
+        "activityBuffer": [],
+    }
+
+    # Detect issue from branch name
+    branch_issue = _detect_issue_from_branch(root, cfg)
+    if branch_issue:
+        session["currentIssue"] = branch_issue
+        session["activeIssues"][branch_issue] = {
+            "startTime": int(time.time()),
+            "totalSeconds": 0,
+            "paused": False,
+        }
+        debug_log(
+            f"Detected issue from branch: {branch_issue}",
+            category="session-start",
+            enabled=cfg.get("debugLog", False),
+        )
+
+    save_session(root, session)
+    debug_log(
+        "Session initialized",
+        category="session-start",
+        enabled=cfg.get("debugLog", False),
+        root=root,
+        sessionId=session_id,
+    )
+
+
 # Stubs — implemented in subsequent tasks
-def cmd_session_start(args): pass
 def cmd_log_activity(args): pass
 def cmd_drain_buffer(args): pass
 def cmd_session_end(args): pass
