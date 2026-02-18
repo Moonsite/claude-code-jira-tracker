@@ -4,7 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This is a Claude Code **plugin** called **jira-autopilot**. It provides automatic Jira issue tracking, work documentation, and time logging via hooks and slash commands. Every task done in Claude Code is tracked, documented, and logged to Jira with minimal manual intervention.
+This is **moonsite-claude-extensions** — a collection of Claude Code extensions (plugins, skills, and hooks) by Moonsite. The repository is structured as a marketplace with each extension in its own directory.
+
+### Current extensions
+
+- **jira-autopilot** (`plugins/jira-autopilot/`) — Autonomous Jira work tracking, issue creation, and time logging.
+
+## jira-autopilot Architecture
 
 ## Architecture
 

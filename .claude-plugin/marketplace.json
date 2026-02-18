@@ -1,13 +1,13 @@
 {
-  "name": "moonsite-claude-plugins",
+  "name": "moonsite-claude-extensions",
   "owner": {
     "name": "Moonsite",
     "url": "https://github.com/Moonsite"
   },
   "metadata": {
-    "description": "Moonsite Claude plugins store",
+    "description": "Moonsite extensions for Claude Code — plugins, skills, and hooks",
     "version": "1.0.0",
-    "homepage": "https://github.com/Moonsite/claude-code-jira-tracker"
+    "homepage": "https://github.com/Moonsite/moonsite-claude-extensions"
   },
   "plugins": [
     {
@@ -19,7 +19,7 @@
         "name": "Boris Sigalov"
       },
       "category": "workflow",
-      "homepage": "https://github.com/Moonsite/claude-code-jira-tracker",
+      "homepage": "https://github.com/Moonsite/moonsite-claude-extensions",
       "keywords": [
         "jira",
         "tracking",
