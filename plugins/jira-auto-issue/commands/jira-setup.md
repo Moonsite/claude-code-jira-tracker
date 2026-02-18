@@ -12,7 +12,7 @@ You are configuring the jira-auto-issue plugin for this project.
 
 1. **Ask for project key** — this is the prefix of Jira issues, e.g. `PROJ` from `PROJ-123`. Example: "What's your Jira project key? (the prefix before the dash in issue numbers, e.g. PROJ from PROJ-123)"
 
-2. **Ask for Jira base URL** — e.g. `https://company.atlassian.net`. Validate it looks like a URL.
+2. **Ask for Jira base URL** — Ask the user to type their Jira base URL. Do NOT suggest specific URLs or provide example domain names — just ask for the URL as free text. Validate it looks like a URL starting with `https://`.
    - Auto-fetch Cloud ID: run `curl -s <baseUrl>/_edge/tenant_info` and extract `cloudId` from JSON response using `python3 -c "import json,sys; print(json.load(sys.stdin).get('cloudId',''))"`.
    - If fetch fails, ask the user for cloudId manually.
 
