@@ -669,8 +669,32 @@ def cmd_session_end(args):
     )
 
 
-# Stub — implemented in subsequent task
-def cmd_suggest_parent(args): pass
+def suggest_parent(root: str, summary: str) -> dict:
+    """Suggest parent issues from session history and local config."""
+    session = load_session(root)
+    local = load_local_config(root)
+
+    last_parent = session.get("lastParentKey")
+    recent_parents = local.get("recentParents", [])
+
+    recent = [{"key": k} for k in recent_parents]
+
+    # Contextual search would require Jira API credentials.
+    # Return empty contextual list — Claude fills via MCP instead.
+    contextual = []
+
+    return {
+        "sessionDefault": last_parent,
+        "contextual": contextual,
+        "recent": recent,
+    }
+
+
+def cmd_suggest_parent(args):
+    root = args[0] if args else "."
+    summary = args[1] if len(args) > 1 else ""
+    result = suggest_parent(root, summary)
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":

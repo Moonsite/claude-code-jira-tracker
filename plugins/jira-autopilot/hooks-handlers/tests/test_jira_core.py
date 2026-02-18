@@ -22,6 +22,7 @@ from jira_core import (
     classify_issue,
     build_worklog,
     cmd_session_end,
+    suggest_parent,
 )
 
 
@@ -653,3 +654,50 @@ class TestSessionEnd:
         issue_keys = {w["issueKey"] for w in updated["pendingWorklogs"]}
         assert "TEST-1" in issue_keys
         assert "TEST-2" in issue_keys
+
+
+# ── Task 1.8: suggest-parent ─────────────────────────────────────────────
+
+
+class TestSuggestParent:
+    def test_returns_recent_parents(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / LOCAL_CONFIG_NAME).write_text(json.dumps({
+            "recentParents": ["TEST-10", "TEST-8"],
+        }))
+        (claude_dir / CONFIG_NAME).write_text(json.dumps({
+            "projectKey": "TEST", "debugLog": False,
+        }))
+        session = {"lastParentKey": "TEST-10"}
+        (claude_dir / SESSION_NAME).write_text(json.dumps(session))
+        result = suggest_parent(str(tmp_path), "Fix auth bug")
+        recent_keys = [r["key"] for r in result.get("recent", [])]
+        assert "TEST-10" in recent_keys
+        assert "TEST-8" in recent_keys
+
+    def test_session_default_from_last_parent(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / LOCAL_CONFIG_NAME).write_text(json.dumps({
+            "recentParents": ["TEST-10"],
+        }))
+        (claude_dir / CONFIG_NAME).write_text(json.dumps({
+            "projectKey": "TEST", "debugLog": False,
+        }))
+        session = {"lastParentKey": "TEST-10"}
+        (claude_dir / SESSION_NAME).write_text(json.dumps(session))
+        result = suggest_parent(str(tmp_path), "Some task")
+        assert result["sessionDefault"] == "TEST-10"
+
+    def test_no_recent_parents(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / CONFIG_NAME).write_text(json.dumps({
+            "projectKey": "TEST", "debugLog": False,
+        }))
+        (claude_dir / SESSION_NAME).write_text(json.dumps({}))
+        result = suggest_parent(str(tmp_path), "Some task")
+        assert result["sessionDefault"] is None
+        assert result["recent"] == []
+        assert result["contextual"] == []
