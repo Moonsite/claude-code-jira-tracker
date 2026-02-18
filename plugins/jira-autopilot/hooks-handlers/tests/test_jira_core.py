@@ -20,6 +20,7 @@ from jira_core import (
     cmd_log_activity,
     cmd_drain_buffer,
     classify_issue,
+    build_worklog,
 )
 
 
@@ -441,3 +442,76 @@ class TestClassifyIssue:
         result = classify_issue("Fix login crash")
         assert "fix" in result["signals"]
         assert "crash" in result["signals"]
+
+
+# ── Task 1.6: build-worklog ──────────────────────────────────────────────
+
+
+class TestBuildWorklog:
+    def test_summary_includes_files(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / CONFIG_NAME).write_text(json.dumps({
+            "debugLog": False, "accuracy": 5,
+        }))
+        session = {
+            "currentIssue": "TEST-1",
+            "activeIssues": {"TEST-1": {"startTime": 1000, "totalSeconds": 600}},
+            "workChunks": [{
+                "id": "chunk-1", "issueKey": "TEST-1",
+                "startTime": 1000, "endTime": 1600,
+                "filesChanged": ["src/auth.ts", "src/middleware.ts"],
+                "activities": [
+                    {"tool": "Edit", "type": "file_edit"},
+                    {"tool": "Edit", "type": "file_edit"},
+                    {"tool": "Bash", "type": "bash", "command": "npm test"},
+                ],
+                "idleGaps": [],
+            }],
+        }
+        (claude_dir / SESSION_NAME).write_text(json.dumps(session))
+        result = build_worklog(str(tmp_path), "TEST-1")
+        assert "auth.ts" in result["summary"] or "middleware.ts" in result["summary"]
+        assert result["seconds"] > 0
+        assert result["issueKey"] == "TEST-1"
+
+    def test_raw_facts_contains_files_and_commands(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / CONFIG_NAME).write_text(json.dumps({
+            "debugLog": False, "accuracy": 5,
+        }))
+        session = {
+            "currentIssue": "TEST-1",
+            "activeIssues": {"TEST-1": {"startTime": 1000, "totalSeconds": 0}},
+            "workChunks": [{
+                "id": "c1", "issueKey": "TEST-1",
+                "startTime": 1000, "endTime": 1300,
+                "filesChanged": ["a.ts"],
+                "activities": [
+                    {"tool": "Edit", "type": "file_edit"},
+                    {"tool": "Bash", "type": "bash", "command": "npm test"},
+                    {"tool": "Bash", "type": "bash", "command": "npm run lint"},
+                ],
+                "idleGaps": [],
+            }],
+        }
+        (claude_dir / SESSION_NAME).write_text(json.dumps(session))
+        result = build_worklog(str(tmp_path), "TEST-1")
+        assert "a.ts" in result["rawFacts"]["files"]
+        assert "npm test" in result["rawFacts"]["commands"]
+        assert result["rawFacts"]["activityCount"] == 3
+
+    def test_no_chunks_returns_zero(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / CONFIG_NAME).write_text(json.dumps({"debugLog": False}))
+        session = {
+            "currentIssue": "TEST-1",
+            "activeIssues": {"TEST-1": {"startTime": 1000, "totalSeconds": 0}},
+            "workChunks": [],
+        }
+        (claude_dir / SESSION_NAME).write_text(json.dumps(session))
+        result = build_worklog(str(tmp_path), "TEST-1")
+        assert result["seconds"] == 0
+        assert result["rawFacts"]["activityCount"] == 0

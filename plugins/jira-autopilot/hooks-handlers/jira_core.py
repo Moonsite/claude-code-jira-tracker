@@ -517,10 +517,76 @@ def cmd_classify_issue(args):
     print(json.dumps(result))
 
 
+def build_worklog(root: str, issue_key: str) -> dict:
+    """Build worklog summary from work chunks for an issue."""
+    session = load_session(root)
+    chunks = [
+        c for c in session.get("workChunks", [])
+        if c.get("issueKey") == issue_key
+    ]
+
+    all_files = []
+    all_commands = []
+    total_activities = 0
+    total_seconds = 0
+
+    for chunk in chunks:
+        all_files.extend(chunk.get("filesChanged", []))
+        for act in chunk.get("activities", []):
+            total_activities += 1
+            if act.get("command"):
+                all_commands.append(act["command"])
+
+        start = chunk.get("startTime", 0)
+        end = chunk.get("endTime", 0)
+        chunk_time = end - start
+        # Subtract idle gaps
+        for gap in chunk.get("idleGaps", []):
+            chunk_time -= gap.get("seconds", 0)
+        total_seconds += max(chunk_time, 0)
+
+    # Deduplicate files, keep just basenames for summary
+    unique_files = list(dict.fromkeys(all_files))
+    file_basenames = [os.path.basename(f) for f in unique_files if f]
+    unique_commands = list(dict.fromkeys(all_commands))
+
+    # Build human-readable summary
+    parts = []
+    if file_basenames:
+        parts.append(f"Edited {', '.join(file_basenames[:5])}")
+        if len(file_basenames) > 5:
+            parts.append(f"and {len(file_basenames) - 5} more files")
+    if unique_commands:
+        cmd_str = ", ".join(unique_commands[:3])
+        parts.append(f"Ran: {cmd_str}")
+    parts.append(f"{total_activities} tool calls")
+    summary = ". ".join(parts) + "."
+
+    return {
+        "issueKey": issue_key,
+        "seconds": total_seconds,
+        "summary": summary,
+        "rawFacts": {
+            "files": unique_files,
+            "commands": unique_commands,
+            "activityCount": total_activities,
+        },
+    }
+
+
+def cmd_build_worklog(args):
+    root = args[0] if args else "."
+    issue_key = args[1] if len(args) > 1 else ""
+    if not issue_key:
+        print("{}", file=sys.stderr)
+        return
+    result = build_worklog(root, issue_key)
+    print(json.dumps(result))
+
+
 # Stubs — implemented in subsequent tasks
 def cmd_session_end(args): pass
 def cmd_suggest_parent(args): pass
-def cmd_build_worklog(args): pass
 
 
 if __name__ == "__main__":
