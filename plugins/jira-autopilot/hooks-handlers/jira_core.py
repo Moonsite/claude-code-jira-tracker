@@ -196,9 +196,11 @@ def cmd_session_start(args):
     existing = load_session(root)
     # If there's already an active session with issues, preserve it
     if existing.get("activeIssues"):
-        # Update autonomy/accuracy from config in case it changed
+        # Always sync autonomy/accuracy from config (may have changed via /jira-setup)
         existing["autonomyLevel"] = cfg.get("autonomyLevel", "C")
         existing["accuracy"] = cfg.get("accuracy", 5)
+        # Sanitize any credentials that may have been logged before the fix
+        _sanitize_session_commands(existing)
         save_session(root, existing)
         debug_log(
             "Resuming existing session",
@@ -280,6 +282,17 @@ def _sanitize_command(command: str) -> str:
     return command
 
 
+def _sanitize_session_commands(session: dict):
+    """Retroactively sanitize commands in workChunks and activityBuffer."""
+    for chunk in session.get("workChunks", []):
+        for activity in chunk.get("activities", []):
+            if activity.get("command"):
+                activity["command"] = _sanitize_command(activity["command"])
+    for activity in session.get("activityBuffer", []):
+        if activity.get("command"):
+            activity["command"] = _sanitize_command(activity["command"])
+
+
 def cmd_log_activity(args):
     root = args[0] if args else "."
     tool_json_str = args[1] if len(args) > 1 else "{}"
@@ -303,6 +316,11 @@ def cmd_log_activity(args):
     activity_type = TOOL_TYPE_MAP.get(tool_name, "other")
     file_path = tool_input.get("file_path", "")
     command = tool_input.get("command", "")
+
+    # Skip writes to internal plugin state/config files — these are noise,
+    # not user work, and may contain sensitive paths or credential data
+    if file_path and "/.claude/" in file_path:
+        return
 
     activity = {
         "timestamp": int(time.time()),
