@@ -10,7 +10,10 @@ You are configuring the jira-auto-issue plugin for this project.
 
 ## Steps
 
-1. **Ask for project key** — this is the prefix of Jira issues, e.g. `PROJ` from `PROJ-123`. Example: "What's your Jira project key? (the prefix before the dash in issue numbers, e.g. PROJ from PROJ-123)"
+1. **Auto-detect project key from git history** — Before asking the user, try to detect the project key automatically:
+   - Run: `bash plugins/jira-auto-issue/hooks-handlers/helpers.sh detect_project_key` (or inline the logic: scan `git log --oneline -100` and `git branch -a` for patterns matching `[A-Z]+-\d+`, extract the most common prefixes)
+   - If keys are detected, present them as choices: "I found these project keys in your git history:" and list them. Let the user pick one or type a different key.
+   - If no keys are detected, ask normally: "What's your Jira project key? (the prefix before the dash in issue numbers, e.g. PROJ from PROJ-123)"
 
 2. **Check for saved global credentials** — Before asking for URL and credentials:
    - Check if `~/.claude/jira-tracker.global.json` exists and contains `baseUrl`, `email`, `apiToken`.
