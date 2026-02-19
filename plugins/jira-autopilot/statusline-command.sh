@@ -143,6 +143,11 @@ PYEOF
   # Build label: "PROJ-42 · 37m" or with pending "PROJ-42 · 37m · 2 pending"
   # Plugin version from plugin.json
   plugin_version=$(jq -r '.version // empty' "$jira_root/plugins/jira-autopilot/.claude-plugin/plugin.json" 2>/dev/null)
+  # Fallback to global cache for projects that aren't the plugin repo itself
+  if [ -z "$plugin_version" ]; then
+    _cache="$HOME/.claude/plugins/cache/moonsite-claude-extensions/jira-autopilot"
+    plugin_version=$(ls "$_cache" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+  fi
 
   if [ -n "$jira_issue" ]; then
     version_suffix=""
