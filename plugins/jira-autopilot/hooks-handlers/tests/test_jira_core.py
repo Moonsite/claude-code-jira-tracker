@@ -1542,8 +1542,20 @@ class TestTextToAdf:
     def test_multi_line_with_blank(self):
         result = _text_to_adf("Line one\n\nLine two")
         content = result["content"]
-        assert len(content) == 3
-        assert content[1]["content"] == []  # blank line → empty paragraph
+        # blank lines are skipped — only non-empty lines produce paragraphs
+        assert len(content) == 2
+        assert content[0]["content"][0]["text"] == "Line one"
+        assert content[1]["content"][0]["text"] == "Line two"
+
+    def test_empty_string_fallback(self):
+        result = _text_to_adf("")
+        # empty input produces a single paragraph with em-dash placeholder
+        assert len(result["content"]) == 1
+        assert result["content"][0]["content"][0]["text"] == "—"
+
+    def test_whitespace_only_fallback(self):
+        result = _text_to_adf("   ")
+        assert len(result["content"]) == 1
 
 
 # ── post_worklog_to_jira HTTP paths ──────────────────────────────────────
