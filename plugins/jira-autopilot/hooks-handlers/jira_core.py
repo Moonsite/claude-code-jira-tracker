@@ -1045,8 +1045,11 @@ def _text_to_adf(text: str) -> dict:
             paragraphs.append(
                 {"type": "paragraph", "content": [{"type": "text", "text": line}]}
             )
-        else:
-            paragraphs.append({"type": "paragraph", "content": []})
+        # Skip blank lines — empty paragraph nodes render as blank description in Jira
+    if not paragraphs:
+        paragraphs.append(
+            {"type": "paragraph", "content": [{"type": "text", "text": text or "—"}]}
+        )
     return {"version": 1, "type": "doc", "content": paragraphs}
 
 
@@ -1055,9 +1058,11 @@ def post_worklog_to_jira(base_url: str, email: str, api_token: str,
     """POST a worklog entry to Jira Cloud REST API. Returns True on success."""
     url = f"{base_url.rstrip('/')}/rest/api/3/issue/{issue_key}/worklog"
     auth = base64.b64encode(f"{email}:{api_token}".encode()).decode()
+    # Fallback description when caller provides no subject (e.g. empty task name)
+    effective_comment = comment.strip() or f"Work logged via jira-autopilot ({seconds // 60}m)"
     payload = json.dumps({
         "timeSpentSeconds": seconds,
-        "comment": _text_to_adf(comment),
+        "comment": _text_to_adf(effective_comment),
     }).encode()
     req = urllib.request.Request(url, data=payload, method="POST")
     req.add_header("Authorization", f"Basic {auth}")
