@@ -684,6 +684,8 @@ def cmd_drain_buffer(args):
 
     buffer = session.get("activityBuffer", [])
     if not buffer:
+        # Buffer is empty but periodic flush may still be due
+        _flush_periodic_worklogs(root, session, cfg)
         return
 
     idle_threshold = _get_idle_threshold_seconds(cfg)

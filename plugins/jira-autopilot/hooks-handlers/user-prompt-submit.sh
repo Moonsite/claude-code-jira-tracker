@@ -53,9 +53,7 @@ PYEOF
   exit 0
 fi
 
-# ── Task/fix intent with no active issue ─────────────────────────────────────
-[[ -n "$CURRENT" && "$CURRENT" != "None" ]] && exit 0
-
+# ── Task/fix intent ───────────────────────────────────────────────────────────
 TASK_SIGNALS="implement\|add feature\|add a\|build\|create\|develop\|write a\|make a\|set up\|setup\|refactor\|migrate\|integrate\|scaffold"
 BUG_SIGNALS="fix\|bug\|broken\|crash\|error\|not working\|failing\|regression\|issue with\|problem with\|debug"
 
@@ -69,9 +67,10 @@ fi
 
 [[ "$MATCHED" -eq 0 ]] && exit 0
 
-python3 - <<'PYEOF'
+# No active issue — require /jira-start before any code
+if [[ -z "$CURRENT" || "$CURRENT" == "None" ]]; then
+  python3 - <<'PYEOF'
 import json, sys
-
 msg = (
     "[jira-autopilot] No active Jira issue detected. Before writing any code:\n"
     "  1. Run /jira-start to create or link a Jira ticket for this work.\n"
@@ -81,6 +80,21 @@ msg = (
     "  5. When done, run /jira-stop — you will be prompted to open a PR.\n\n"
     "Proceed only after a Jira issue is active."
 )
-
 print(json.dumps({"systemMessage": msg}))
 PYEOF
+
+# Issue already active — this is a NEW task/bug, create a sub-issue for it
+else
+  python3 - "$CURRENT" <<'PYEOF'
+import json, sys
+current = sys.argv[1]
+msg = (
+    f"[jira-autopilot] New task or bug detected while {current} is active.\n"
+    f"  Create a Jira sub-task or linked issue for this work BEFORE writing any code:\n"
+    f"  • Use /jira-start <summary> to create a new issue linked to {current}\n"
+    f"  • Or use /jira-start <KEY> to switch to an existing issue\n\n"
+    f"  Do NOT accumulate unrelated work under {current}. Each distinct task needs its own ticket."
+)
+print(json.dumps({"systemMessage": msg}))
+PYEOF
+fi
