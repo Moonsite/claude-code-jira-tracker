@@ -5,7 +5,7 @@
     "url": "https://github.com/Moonsite"
   },
   "metadata": {
-    "description": "Moonsite extensions for Claude Code — plugins, skills, and hooks",
+    "description": "Moonsite extensions for Claude Code \u2014 plugins, skills, and hooks",
     "version": "1.0.0",
     "homepage": "https://github.com/Moonsite/moonsite-claude-extensions"
   },
@@ -14,7 +14,7 @@
       "name": "jira-autopilot",
       "source": "./plugins/jira-autopilot",
       "description": "Autonomous Jira work tracking, issue creation, and time logging for Claude Code sessions",
-      "version": "3.3.0",
+      "version": "3.4.0",
       "author": {
         "name": "Boris Sigalov"
       },
