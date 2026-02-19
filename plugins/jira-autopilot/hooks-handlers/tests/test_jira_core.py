@@ -38,6 +38,7 @@ from jira_core import (
     _get_dir_cluster,
     _detect_context_switch,
     _round_seconds,
+    _flush_periodic_worklogs,
     _text_to_adf,
     _handle_task_event,
     _log_task_time,
@@ -1988,5 +1989,129 @@ class TestPlanningTracking:
         updated = json.loads((claude_dir / SESSION_NAME).read_text())
         assert updated["activePlanning"] is None
         # Planning worklog was posted
+        mock_post.assert_called_once()
+        assert mock_post.call_args[0][3] == "TEST-1"
+
+
+class TestFlushPeriodicWorklogs:
+    def _make_session(self, tmp_path, autonomy="A", last_worklog_offset=0):
+        """Create a session with one active issue and one work chunk."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        now = int(time.time())
+        session = {
+            "sessionId": "t",
+            "currentIssue": "TEST-1",
+            "autonomyLevel": autonomy,
+            "accuracy": 5,
+            "activeIssues": {
+                "TEST-1": {"startTime": now - 3600, "totalSeconds": 0, "paused": False}
+            },
+            "workChunks": [{
+                "id": "c1", "issueKey": "TEST-1",
+                "startTime": now - 600, "endTime": now - 60,
+                "filesChanged": ["a.ts"],
+                "activities": [{"tool": "Edit", "type": "file_edit"}],
+                "idleGaps": [],
+            }],
+            "activityBuffer": [],
+            "pendingWorklogs": [],
+            "activeTasks": {},
+            "activePlanning": None,
+            "lastWorklogTime": now - last_worklog_offset,
+        }
+        (claude_dir / SESSION_NAME).write_text(json.dumps(session))
+        (claude_dir / CONFIG_NAME).write_text(json.dumps({
+            "enabled": True, "autonomyLevel": autonomy,
+            "worklogInterval": 15,
+        }))
+        (claude_dir / LOCAL_CONFIG_NAME).write_text(json.dumps({
+            "baseUrl": "https://example.atlassian.net",
+            "email": "test@example.com",
+            "apiToken": "token123",
+        }))
+        return tmp_path, claude_dir, session
+
+    def test_no_flush_before_interval(self, tmp_path):
+        """Does nothing when interval hasn't elapsed."""
+        root, claude_dir, _ = self._make_session(tmp_path, last_worklog_offset=60)
+        cfg = {"worklogInterval": 15, "autonomyLevel": "A"}
+        session = load_session(str(tmp_path))
+        with patch("jira_core.post_worklog_to_jira", return_value=True) as mock_post:
+            _flush_periodic_worklogs(str(tmp_path), session, cfg)
+        mock_post.assert_not_called()
+        updated = load_session(str(tmp_path))
+        assert updated["pendingWorklogs"] == []
+
+    def test_flush_after_interval_autonomy_a_posts(self, tmp_path):
+        """Posts worklog automatically when autonomy=A and interval elapsed."""
+        root, claude_dir, _ = self._make_session(tmp_path, autonomy="A", last_worklog_offset=1000)
+        cfg = {"worklogInterval": 15, "autonomyLevel": "A", "timeRounding": 15, "accuracy": 5}
+        session = load_session(str(tmp_path))
+        with patch("jira_core.post_worklog_to_jira", return_value=True) as mock_post:
+            _flush_periodic_worklogs(str(tmp_path), session, cfg)
+        mock_post.assert_called_once()
+        assert mock_post.call_args[0][3] == "TEST-1"
+
+    def test_flush_after_interval_autonomy_c_stays_pending(self, tmp_path):
+        """Queues worklog as pending (no auto-post) when autonomy=C."""
+        root, claude_dir, _ = self._make_session(tmp_path, autonomy="C", last_worklog_offset=1000)
+        cfg = {"worklogInterval": 15, "autonomyLevel": "C", "timeRounding": 15, "accuracy": 5}
+        session = load_session(str(tmp_path))
+        with patch("jira_core.post_worklog_to_jira", return_value=True) as mock_post:
+            _flush_periodic_worklogs(str(tmp_path), session, cfg)
+        mock_post.assert_not_called()
+        updated = load_session(str(tmp_path))
+        assert len(updated["pendingWorklogs"]) == 1
+        assert updated["pendingWorklogs"][0]["status"] == "pending"
+        assert updated["pendingWorklogs"][0]["issueKey"] == "TEST-1"
+
+    def test_flush_clears_work_chunks(self, tmp_path):
+        """Work chunks are removed after flush so session-end doesn't re-sum them."""
+        root, claude_dir, _ = self._make_session(tmp_path, autonomy="A", last_worklog_offset=1000)
+        cfg = {"worklogInterval": 15, "autonomyLevel": "A", "timeRounding": 15, "accuracy": 5}
+        session = load_session(str(tmp_path))
+        with patch("jira_core.post_worklog_to_jira", return_value=True):
+            _flush_periodic_worklogs(str(tmp_path), session, cfg)
+        updated = load_session(str(tmp_path))
+        assert updated["workChunks"] == []
+
+    def test_flush_updates_last_worklog_time(self, tmp_path):
+        """lastWorklogTime is updated after a successful flush."""
+        root, claude_dir, _ = self._make_session(tmp_path, autonomy="A", last_worklog_offset=1000)
+        cfg = {"worklogInterval": 15, "autonomyLevel": "A", "timeRounding": 15, "accuracy": 5}
+        session = load_session(str(tmp_path))
+        before = int(time.time())
+        with patch("jira_core.post_worklog_to_jira", return_value=True):
+            _flush_periodic_worklogs(str(tmp_path), session, cfg)
+        updated = load_session(str(tmp_path))
+        assert updated["lastWorklogTime"] >= before
+
+    def test_flush_skips_issue_with_no_chunks(self, tmp_path):
+        """Issues with no work chunks produce no worklog entry."""
+        root, claude_dir, _ = self._make_session(tmp_path, autonomy="A", last_worklog_offset=1000)
+        # Remove the chunk so build_worklog returns 0s
+        session = load_session(str(tmp_path))
+        session["workChunks"] = []
+        save_session(str(tmp_path), session)
+        cfg = {"worklogInterval": 15, "autonomyLevel": "A", "timeRounding": 15, "accuracy": 5}
+        session = load_session(str(tmp_path))
+        with patch("jira_core.post_worklog_to_jira", return_value=True) as mock_post:
+            _flush_periodic_worklogs(str(tmp_path), session, cfg)
+        mock_post.assert_not_called()
+
+    def test_drain_buffer_triggers_flush_after_interval(self, tmp_path):
+        """cmd_drain_buffer calls periodic flush when interval has elapsed."""
+        root, claude_dir, _ = self._make_session(tmp_path, autonomy="A", last_worklog_offset=1000)
+        # Add something to the activity buffer so drain has work to do
+        session = load_session(str(tmp_path))
+        now = int(time.time())
+        session["activityBuffer"] = [{
+            "timestamp": now - 30, "tool": "Edit", "type": "file_edit",
+            "issueKey": "TEST-1", "file": "a.ts",
+        }]
+        save_session(str(tmp_path), session)
+        with patch("jira_core.post_worklog_to_jira", return_value=True) as mock_post:
+            cmd_drain_buffer([str(tmp_path)])
         mock_post.assert_called_once()
         assert mock_post.call_args[0][3] == "TEST-1"

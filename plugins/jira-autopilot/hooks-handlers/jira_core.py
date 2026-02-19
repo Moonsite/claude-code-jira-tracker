@@ -217,9 +217,10 @@ def cmd_session_start(args):
         # Always sync autonomy/accuracy from config (may have changed via /jira-setup)
         existing["autonomyLevel"] = cfg.get("autonomyLevel", "C")
         existing["accuracy"] = cfg.get("accuracy", 5)
-        # Ensure activeTasks / activePlanning exist (may be missing in older sessions)
+        # Ensure activeTasks / activePlanning / lastWorklogTime exist (may be missing in older sessions)
         existing.setdefault("activeTasks", {})
         existing.setdefault("activePlanning", None)
+        existing.setdefault("lastWorklogTime", int(time.time()))
         # Assign sessionId if missing (sessions created by /jira-start may lack one)
         if not existing.get("sessionId"):
             existing["sessionId"] = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -248,6 +249,7 @@ def cmd_session_start(args):
         "activityBuffer": [],
         "activeTasks": {},
         "activePlanning": None,
+        "lastWorklogTime": int(time.time()),
     }
 
     # Detect issue from branch name
@@ -613,6 +615,66 @@ def _detect_context_switch(prev_activities: list, curr_activities: list,
                 and len(curr_activities) >= 3)
 
 
+def _flush_periodic_worklogs(root: str, session: dict, cfg: dict):
+    """Post a worklog for each active issue if worklogInterval minutes have elapsed."""
+    interval_minutes = cfg.get("worklogInterval", 15)
+    interval_seconds = interval_minutes * 60
+    now = int(time.time())
+    last = session.get("lastWorklogTime", now)
+    debug = cfg.get("debugLog", False)
+
+    if now - last < interval_seconds:
+        return
+
+    autonomy = session.get("autonomyLevel", cfg.get("autonomyLevel", "C"))
+    accuracy = session.get("accuracy", cfg.get("accuracy", 5))
+    time_rounding = cfg.get("timeRounding", 15)
+    active_issues = session.get("activeIssues", {})
+
+    if not active_issues:
+        return
+
+    flushed_any = False
+    for issue_key in list(active_issues.keys()):
+        worklog = build_worklog(root, issue_key)
+        raw_seconds = worklog["seconds"]
+        if raw_seconds <= 0:
+            continue
+
+        rounded = _round_seconds(raw_seconds, time_rounding, accuracy)
+        entry = {
+            "issueKey": issue_key,
+            "seconds": rounded,
+            "summary": worklog["summary"],
+            "rawFacts": worklog["rawFacts"],
+            "status": "pending" if autonomy == "C" else "approved",
+        }
+        session.setdefault("pendingWorklogs", []).append(entry)
+        flushed_any = True
+
+        debug_log(
+            f"periodic flush issue={issue_key} raw={raw_seconds}s rounded={rounded}s "
+            f"autonomy={autonomy} interval={interval_minutes}m",
+            category="periodic-worklog", enabled=debug,
+        )
+
+    if not flushed_any:
+        return
+
+    # Clear chunks that were just summarised so session-end doesn't re-sum them
+    processed_keys = set(active_issues.keys())
+    session["workChunks"] = [
+        c for c in session.get("workChunks", [])
+        if c.get("issueKey") not in processed_keys
+    ]
+    session["lastWorklogTime"] = now
+    save_session(root, session)
+
+    # Post immediately for autonomy A/B; autonomy C stays pending until /jira-approve
+    if autonomy != "C":
+        cmd_post_worklogs([root])
+
+
 def cmd_drain_buffer(args):
     root = args[0] if args else "."
     cfg = load_config(root)
@@ -732,6 +794,9 @@ def cmd_drain_buffer(args):
         category="drain-buffer",
         enabled=cfg.get("debugLog", False),
     )
+
+    # Periodic worklog flush (every worklogInterval minutes)
+    _flush_periodic_worklogs(root, session, cfg)
 
     # Output context switch info for Claude
     flagged = [c for c in chunks if c.get("needsAttribution")]
