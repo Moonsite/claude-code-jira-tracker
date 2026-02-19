@@ -122,6 +122,152 @@ def debug_log(message: str, category: str = "general", enabled: bool = True,
 
 # ── CLI Dispatcher ─────────────────────────────────────────────────────────
 
+def cmd_create_issue(args):
+    """Create a Jira issue via REST API. Prints the new issue key on success.
+
+    Usage: jira_core.py create-issue <root> --project KEY --summary TEXT
+           [--type Task|Bug|Story|Subtask] [--parent KEY]
+           [--account-id ID] [--cloud-id ID] [--labels l1,l2]
+    """
+    root = args[0] if args else "."
+    # Parse flags
+    params = {}
+    i = 1
+    while i < len(args):
+        if args[i].startswith("--") and i + 1 < len(args):
+            params[args[i][2:]] = args[i + 1]
+            i += 2
+        else:
+            i += 1
+
+    project_key = params.get("project", "")
+    summary = params.get("summary", "")
+    issue_type = params.get("type", "Task")
+    parent_key = params.get("parent", "")
+    assignee_id = params.get("account-id", "")
+    labels_raw = params.get("labels", "")
+    labels = [l.strip() for l in labels_raw.split(",") if l.strip()] if labels_raw else []
+
+    if not project_key or not summary:
+        print("Error: --project and --summary are required", file=sys.stderr)
+        sys.exit(1)
+
+    base_url = get_cred(root, "baseUrl")
+    email = get_cred(root, "email")
+    api_token = get_cred(root, "apiToken")
+    if not (base_url and email and api_token):
+        print("Error: missing credentials in jira-autopilot.local.json", file=sys.stderr)
+        sys.exit(1)
+
+    url = f"{base_url.rstrip('/')}/rest/api/3/issue"
+    auth = base64.b64encode(f"{email}:{api_token}".encode()).decode()
+    fields: dict = {
+        "project": {"key": project_key},
+        "summary": summary,
+        "issuetype": {"name": issue_type},
+    }
+    if parent_key:
+        fields["parent"] = {"key": parent_key}
+    if assignee_id:
+        fields["assignee"] = {"id": assignee_id}
+    if labels:
+        fields["labels"] = labels
+
+    payload = json.dumps({"fields": fields}).encode()
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Authorization", f"Basic {auth}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            key = data.get("key", "")
+            print(json.dumps({"key": key, "id": data.get("id", "")}))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        debug_log(f"create-issue HTTP {e.code} {e.reason}: {body[:200]}",
+                  category="jira-api")
+        print(f"Error: HTTP {e.code} {e.reason}: {body[:200]}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        debug_log(f"create-issue error: {e}", category="jira-api")
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_get_issue(args):
+    """Fetch a Jira issue by key via REST API. Prints JSON with key/summary/status/type.
+
+    Usage: jira_core.py get-issue <root> <ISSUE-KEY>
+    """
+    root = args[0] if args else "."
+    issue_key = args[1] if len(args) > 1 else ""
+    if not issue_key:
+        print("Error: issue key required", file=sys.stderr)
+        sys.exit(1)
+
+    base_url = get_cred(root, "baseUrl")
+    email = get_cred(root, "email")
+    api_token = get_cred(root, "apiToken")
+    if not (base_url and email and api_token):
+        print("Error: missing credentials", file=sys.stderr)
+        sys.exit(1)
+
+    url = (f"{base_url.rstrip('/')}/rest/api/3/issue/{issue_key}"
+           "?fields=summary,status,issuetype,parent,assignee")
+    auth = base64.b64encode(f"{email}:{api_token}".encode()).decode()
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Authorization", f"Basic {auth}")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            fields = data.get("fields", {})
+            print(json.dumps({
+                "key": data.get("key"),
+                "summary": fields.get("summary"),
+                "status": fields.get("status", {}).get("name"),
+                "type": fields.get("issuetype", {}).get("name"),
+                "parent": fields.get("parent", {}).get("key") if fields.get("parent") else None,
+            }))
+    except urllib.error.HTTPError as e:
+        debug_log(f"get-issue HTTP {e.code} {e.reason}", category="jira-api")
+        print(f"Error: HTTP {e.code} {e.reason}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        debug_log(f"get-issue error: {e}", category="jira-api")
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_add_worklog(args):
+    """Add a worklog to a Jira issue via REST API.
+
+    Usage: jira_core.py add-worklog <root> <ISSUE-KEY> <seconds> [comment]
+    """
+    root = args[0] if args else "."
+    issue_key = args[1] if len(args) > 1 else ""
+    seconds = int(args[2]) if len(args) > 2 else 0
+    comment = args[3] if len(args) > 3 else ""
+    if not issue_key or seconds <= 0:
+        print("Error: issue key and seconds required", file=sys.stderr)
+        sys.exit(1)
+
+    base_url = get_cred(root, "baseUrl")
+    email = get_cred(root, "email")
+    api_token = get_cred(root, "apiToken")
+    if not (base_url and email and api_token):
+        print("Error: missing credentials", file=sys.stderr)
+        sys.exit(1)
+
+    ok = post_worklog_to_jira(base_url, email, api_token, issue_key, seconds, comment)
+    if ok:
+        print(json.dumps({"ok": True, "issue": issue_key, "seconds": seconds}))
+    else:
+        print("Error: worklog post failed", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: jira_core.py <command> [args...]", file=sys.stderr)
@@ -138,6 +284,10 @@ def main():
         "suggest-parent": cmd_suggest_parent,
         "build-worklog": cmd_build_worklog,
         "debug-log": cmd_debug_log,
+        # REST API commands (no curl dependency)
+        "create-issue": cmd_create_issue,
+        "get-issue": cmd_get_issue,
+        "add-worklog": cmd_add_worklog,
     }
     fn = commands.get(cmd)
     if not fn:

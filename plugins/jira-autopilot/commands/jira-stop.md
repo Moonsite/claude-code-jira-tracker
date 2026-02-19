@@ -103,18 +103,12 @@ Post the worklog silently and print a one-liner:
 [jira-autopilot] Logged <rounded time> to <KEY>
 ```
 
-6. **Post worklog to Jira** — Try MCP first (`mcp__atlassian__addWorklogToJiraIssue` via ToolSearch), providing:
-   - Issue key
-   - Time spent in seconds (rounded value)
-   - Comment/description: the enriched summary
-
-   If MCP fails, fall back to REST:
+6. **Post worklog to Jira** — Try REST first:
    ```bash
-   source <plugin-root>/hooks-handlers/jira-rest.sh
-   jira_load_creds "<project-root>"
-   jira_log_time "<ISSUE_KEY>" <total_seconds>
-   jira_add_comment "<ISSUE_KEY>" "<enriched_summary>"
+   python3 <plugin-root>/hooks-handlers/jira_core.py add-worklog \
+     "<project-root>" "<ISSUE_KEY>" <total_seconds> "<enriched_summary>"
    ```
+   If REST fails (no credentials), fall back to MCP: `mcp__atlassian__addWorklogToJiraIssue` (load via ToolSearch).
 
 7. **Post work summary as comment** — If work chunks exist for this issue and the worklog was approved, post a detailed comment to the issue summarizing files changed and activities performed.
 

@@ -24,12 +24,11 @@ Check `currentIssue` in session state. If set, ask the user if they want to:
 
 ## Link to Existing Issue
 
-1. **Fetch issue details** — Try `mcp__atlassian__getJiraIssue` first (load tool via ToolSearch). If MCP fails, fall back to REST:
+1. **Fetch issue details** — Try REST first:
    ```bash
-   source <plugin-root>/hooks-handlers/jira-rest.sh
-   jira_load_creds "<project-root>"
-   jira_get_issue "<ISSUE_KEY>"
+   python3 <plugin-root>/hooks-handlers/jira_core.py get-issue "<project-root>" "<ISSUE_KEY>"
    ```
+   If REST fails (no credentials), fall back to MCP: `mcp__atlassian__getJiraIssue` (load via ToolSearch).
 2. **Record start time**: run `date +%s`
 3. **Update session state** in `<project-root>/.claude/jira-session.json`:
    - Add issue to `activeIssues` with summary, startTime, totalSeconds: 0, paused: false, autoApproveWorklogs: false
@@ -131,20 +130,19 @@ If a Story is selected/created, create an issue link (type: "Relates") between t
 
 ### Step 5: Create the issue
 
-Try `mcp__atlassian__createJiraIssue` first (load via ToolSearch), providing:
-- project key, summary, issue type (from step 1)
-- parent key (from step 2, if selected)
-- assignee accountId
-- labels
-- component (if determined)
-- fix version (if determined)
-
-If MCP fails, fall back to REST:
+Try REST first:
 ```bash
-source <plugin-root>/hooks-handlers/jira-rest.sh
-jira_load_creds "<project-root>"
-jira_create_issue "<PROJECT_KEY>" "<summary>" "<type>" "<parent_key>" "<assignee_id>"
+python3 <plugin-root>/hooks-handlers/jira_core.py create-issue "<project-root>" \
+  --project "<PROJECT_KEY>" \
+  --summary "<summary>" \
+  --type "<type>" \
+  --parent "<parent_key>" \
+  --account-id "<assignee_id>" \
+  --labels "jira-autopilot"
 ```
+Prints `{"key": "PROJ-42", "id": "..."}` on success.
+
+If REST fails (no credentials configured), fall back to MCP: `mcp__atlassian__createJiraIssue` (load via ToolSearch).
 
 ### Step 6: Post-creation
 
