@@ -47,14 +47,31 @@ Review unattributed work chunks and deferred worklogs, then create or link Jira 
 6. **On Skip**:
    - Update pending item status to `skipped`
 
-7. **For each deferred worklog** (from /jira-stop reject → keep for later):
+7. **For each pending/deferred worklog** (`status == "pending"` or `status == "deferred"`):
+
+   First, get the configured worklog language:
+   ```bash
+   python3 <plugin-root>/hooks-handlers/jira_core.py build-worklog "<project-root>" "<issueKey>"
    ```
-   Deferred Worklog #<n>
+   Read the `logLanguage` field from the output.
+
+   If the existing `summary` is a raw file list (e.g. `"auth.ts, middleware.ts +2"`) rather than a human-readable sentence, **enrich it** — write a 1-3 sentence description of the work in `logLanguage` before presenting it to the user. Use the `rawFacts` from the pending worklog entry if available.
+
+   Then show:
+   ```
+   Worklog #<n>
    Issue: <issueKey>
    Time: <rounded time>
-   Summary: "<summary>"
+   Summary: "<enriched summary in logLanguage>"
    ```
    Ask: Approve (post now) / Edit / Redirect to different issue / Drop
+
+   On Approve — post using REST:
+   ```bash
+   python3 <plugin-root>/hooks-handlers/jira_core.py add-worklog \
+     "<project-root>" "<issueKey>" <seconds> "<enriched_summary>"
+   ```
+   Mark entry status as `posted`.
 
 8. **Update** `jira-session.json` with all changes.
 

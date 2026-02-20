@@ -25,14 +25,16 @@ You are stopping work on the current Jira task and logging time with a worklog a
      "issueKey": "PROJ-1",
      "seconds": 900,
      "summary": "Edited auth.ts, middleware.ts. Ran tests (npm test). 3 tool calls.",
-     "rawFacts": {"files": [...], "commands": [...], "activityCount": 3}
+     "rawFacts": {"files": [...], "commands": [...], "activityCount": 3},
+     "logLanguage": "Hebrew"
    }
    ```
 
-3. **Enrich summary** — Write a human-readable description of what was accomplished. Use the `logLanguage` field from the worklog builder output.
+3. **Enrich summary** — Write a human-readable description of what was accomplished. **Always read the `logLanguage` field** from the build-worklog JSON output and write the summary in that language.
 
    **Format rules:**
-   - Write in `logLanguage` (e.g. Hebrew, English, Russian)
+   - **Write in `logLanguage`** — this is mandatory. If `logLanguage` is `"Hebrew"`, the entire summary must be in Hebrew. If `"Russian"`, in Russian. If `"English"`, in English.
+   - Never default to English if `logLanguage` says otherwise
    - Describe the *work done* in natural language — what was the goal, what was changed, what was the outcome
    - Do NOT include raw commands, git hashes, test output, or code snippets
    - Optionally list relevant files/components/pipelines as a short bullet list at the end
