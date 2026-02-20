@@ -47,6 +47,10 @@ Check `currentIssue` in session state. If set, ask the user if they want to:
 
 ## Create New Issue
 
+### Step 0: Language
+Read `logLanguage` from `<project-root>/.claude/jira-autopilot.json`, falling back to `~/.claude/jira-autopilot.global.json`. Default: `English`.
+Write the issue **summary/title** in that language. If the user typed the summary in a different language, translate/rephrase it into `logLanguage` before creating.
+
 ### Step 1: Classify issue type
 
 Run the type classifier:

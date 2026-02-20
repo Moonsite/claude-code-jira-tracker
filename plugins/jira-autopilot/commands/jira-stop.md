@@ -29,10 +29,27 @@ You are stopping work on the current Jira task and logging time with a worklog a
    }
    ```
 
-3. **Enrich summary** — Use the `rawFacts` from the worklog builder along with your conversation context to write a 1-3 line human-readable work summary. This should describe *what was accomplished*, not just list files.
-   - The worklog builder returns a `logLanguage` field (e.g. `"Hebrew"`, `"Russian"`, `"English"`). **Write the enriched summary in that language.**
-   - Example (English): Raw `files: [auth.ts, middleware.ts], commands: [npm test]` → "Refactored auth middleware to support SSO tokens. All tests passing."
-   - Example (Hebrew): "עודכנה מחלקת האותנטיקציה לתמיכה ב-SSO. כל הבדיקות עברו בהצלחה."
+3. **Enrich summary** — Write a human-readable description of what was accomplished. Use the `logLanguage` field from the worklog builder output.
+
+   **Format rules:**
+   - Write in `logLanguage` (e.g. Hebrew, English, Russian)
+   - Describe the *work done* in natural language — what was the goal, what was changed, what was the outcome
+   - Do NOT include raw commands, git hashes, test output, or code snippets
+   - Optionally list relevant files/components/pipelines as a short bullet list at the end
+   - Keep it concise — 2-4 sentences max + optional file list
+
+   **Good example (Hebrew):**
+   > יישמתי לוגיקת פרסום תקופתי של worklogs — כל X דקות מוגדרות מתפרסם worklog אוטומטי ל-Jira.
+   > תוקן באג שבו הבאפר הריק גרם לדילוג על הפרסום.
+   > קבצים: jira_core.py, test_jira_core.py
+
+   **Good example (English):**
+   > Implemented periodic worklog flushing so time is posted automatically every N minutes.
+   > Fixed a bug where an empty activity buffer bypassed the flush.
+   > Files: jira_core.py, test_jira_core.py
+
+   **Bad example (do NOT do this):**
+   > Ran: cd /Users/… && python3 -m pytest tests/ -q 2>&1 | tail -20. 143 tool calls.
 
 4. **Calculate display time** — Convert seconds to a human-readable format:
    - Round up to nearest increment from `timeRounding` in config (default 15 min)

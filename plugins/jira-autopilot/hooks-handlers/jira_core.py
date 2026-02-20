@@ -1032,22 +1032,24 @@ def build_worklog(root: str, issue_key: str) -> dict:
             chunk_time -= gap.get("seconds", 0)
         total_seconds += max(chunk_time, 0)
 
-    # Deduplicate files, keep just basenames for summary
+    # Deduplicate files; keep relative basenames for readability
     unique_files = list(dict.fromkeys(all_files))
-    file_basenames = [os.path.basename(f) for f in unique_files if f]
     unique_commands = list(dict.fromkeys(all_commands))
+    file_basenames = [os.path.basename(f) for f in unique_files if f]
 
-    # Build human-readable summary
-    parts = []
+    # Build a clean file-list summary (no commands, no "N tool calls").
+    # This is the auto-generated fallback used for periodic/autonomy-A posts.
+    # For /jira-stop, Claude replaces this with a human-narrative summary
+    # in the configured logLanguage.
     if file_basenames:
-        parts.append(f"Edited {', '.join(file_basenames[:5])}")
-        if len(file_basenames) > 5:
-            parts.append(f"and {len(file_basenames) - 5} more files")
-    if unique_commands:
-        cmd_str = ", ".join(unique_commands[:3])
-        parts.append(f"Ran: {cmd_str}")
-    parts.append(f"{total_activities} tool calls")
-    summary = ". ".join(parts) + "."
+        shown = file_basenames[:8]
+        rest = len(file_basenames) - len(shown)
+        file_list = ", ".join(shown)
+        if rest:
+            file_list += f" +{rest}"
+        summary = file_list
+    else:
+        summary = "עבודה על המשימה"  # fallback — language-neutral placeholder
 
     return {
         "issueKey": issue_key,
