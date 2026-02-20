@@ -89,28 +89,44 @@ if [ -n "$used_pct" ]; then
   fi
 fi
 
-# Jira autopilot — walk up from project_dir to find .claude/jira-session.json
+# Jira autopilot — walk up from project_dir to find session or config
 jira_label=""
 jira_root=""
+jira_config_root=""
 _dir="$project_dir"
 while [[ "$_dir" != "/" ]]; do
   if [[ -f "$_dir/.claude/jira-session.json" ]]; then
     jira_root="$_dir"
     break
   fi
+  # Also track the nearest directory with jira-autopilot.json (configured but no session yet)
+  if [[ -z "$jira_config_root" && -f "$_dir/.claude/jira-autopilot.json" ]]; then
+    jira_config_root="$_dir"
+  fi
   _dir="$(dirname "$_dir")"
 done
 jira_session="$jira_root/.claude/jira-session.json"
+
+# Version helper: grep only semver directories (avoids picking up FEEDBACK.md etc.)
+_plugin_version_from_cache() {
+  local _cache="$HOME/.claude/plugins/cache/moonsite-claude-extensions/jira-autopilot"
+  ls "$_cache" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+}
+
 if [ ! -f "$jira_session" ]; then
-  # Try project plugin.json first, fall back to latest in global cache
+  # Try project plugin.json first, fall back to latest semver in global cache
   _plugin_ver=$(jq -r '.version // empty' "$jira_root/plugins/jira-autopilot/.claude-plugin/plugin.json" 2>/dev/null)
-  if [ -z "$_plugin_ver" ]; then
-    _cache="$HOME/.claude/plugins/cache/moonsite-claude-extensions/jira-autopilot"
-    _plugin_ver=$(ls "$_cache" 2>/dev/null | sort -V | tail -1)
-  fi
+  [ -z "$_plugin_ver" ] && _plugin_ver=$(_plugin_version_from_cache)
   _ver_suffix=""
   [ -n "$_plugin_ver" ] && _ver_suffix=" ${C_ICON}v${_plugin_ver}${RESET}"
-  jira_label="${C_ICON}⏱${RESET} ${C_JIRA_UNSET}Jira Autopilot not set${RESET}${_ver_suffix}"
+
+  if [ -n "$jira_config_root" ]; then
+    # Project is configured but session hasn't started yet
+    _proj_key=$(jq -r '.projectKey // "?"' "$jira_config_root/.claude/jira-autopilot.json" 2>/dev/null)
+    jira_label="${C_ICON}⏱${RESET} ${C_ICON}${_proj_key} ready${RESET}${_ver_suffix}"
+  else
+    jira_label="${C_ICON}⏱${RESET} ${C_JIRA_UNSET}Jira Autopilot not set${RESET}${_ver_suffix}"
+  fi
 elif [ -f "$jira_session" ]; then
   jira_issue=$(jq -r '.currentIssue // empty' "$jira_session" 2>/dev/null)
   jira_autonomy=$(jq -r '.autonomyLevel // "C"' "$jira_session" 2>/dev/null)
@@ -145,8 +161,7 @@ PYEOF
   plugin_version=$(jq -r '.version // empty' "$jira_root/plugins/jira-autopilot/.claude-plugin/plugin.json" 2>/dev/null)
   # Fallback to global cache for projects that aren't the plugin repo itself
   if [ -z "$plugin_version" ]; then
-    _cache="$HOME/.claude/plugins/cache/moonsite-claude-extensions/jira-autopilot"
-    plugin_version=$(ls "$_cache" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+    plugin_version=$(_plugin_version_from_cache)
   fi
 
   if [ -n "$jira_issue" ]; then
