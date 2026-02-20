@@ -1350,7 +1350,7 @@ class TestBuildWorklogEdgeCases:
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
         (claude_dir / CONFIG_NAME).write_text(json.dumps({"debugLog": False}))
-        files = [f"src/file{i}.ts" for i in range(7)]
+        files = [f"src/file{i}.ts" for i in range(10)]
         session = {
             "currentIssue": "TEST-1",
             "activeIssues": {"TEST-1": {"startTime": 1000, "totalSeconds": 0}},
@@ -1364,7 +1364,7 @@ class TestBuildWorklogEdgeCases:
         }
         (claude_dir / SESSION_NAME).write_text(json.dumps(session))
         result = build_worklog(str(tmp_path), "TEST-1")
-        assert "more files" in result["summary"]
+        assert "+2" in result["summary"]  # 10 files, show 8, +2 overflow
 
 
 # ── _round_seconds ───────────────────────────────────────────────────────
