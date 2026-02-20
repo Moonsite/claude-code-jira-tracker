@@ -46,6 +46,10 @@ from jira_core import (
     _is_planning_skill,
     _handle_planning_event,
     _log_planning_time,
+    _resolve_autonomy,
+    extract_summary_from_prompt,
+    _is_duplicate_issue,
+    _attempt_auto_create,
 )
 
 
@@ -2127,3 +2131,169 @@ class TestFlushPeriodicWorklogs:
             cmd_drain_buffer([str(tmp_path)])
         mock_post.assert_called_once()
         assert mock_post.call_args[0][3] == "TEST-1"
+
+
+# ── Auto-create feature tests ──────────────────────────────────────────────
+
+class TestResolveAutonomy:
+    def test_letter_a(self):
+        assert _resolve_autonomy({"autonomyLevel": "A"}, {}) == "A"
+
+    def test_letter_b(self):
+        assert _resolve_autonomy({"autonomyLevel": "B"}, {}) == "B"
+
+    def test_letter_c(self):
+        assert _resolve_autonomy({"autonomyLevel": "C"}, {}) == "C"
+
+    def test_numeric_10_is_a(self):
+        assert _resolve_autonomy({"autonomyLevel": 10}, {}) == "A"
+
+    def test_numeric_7_is_b(self):
+        assert _resolve_autonomy({"autonomyLevel": 7}, {}) == "B"
+
+    def test_numeric_3_is_c(self):
+        assert _resolve_autonomy({"autonomyLevel": 3}, {}) == "C"
+
+    def test_falls_back_to_config(self):
+        assert _resolve_autonomy({}, {"autonomyLevel": "A"}) == "A"
+
+    def test_defaults_to_c(self):
+        assert _resolve_autonomy({}, {}) == "C"
+
+
+class TestExtractSummaryFromPrompt:
+    def test_strips_please(self):
+        result = extract_summary_from_prompt("please fix the login crash")
+        assert not result.startswith("Please")
+        assert "login crash" in result.lower()
+
+    def test_strips_can_you(self):
+        result = extract_summary_from_prompt("can you add a search button")
+        assert "can you" not in result.lower()
+        assert "search button" in result.lower()
+
+    def test_strips_i_need_to(self):
+        result = extract_summary_from_prompt("I need to implement the payment flow")
+        assert "i need" not in result.lower()
+
+    def test_strips_help_me(self):
+        result = extract_summary_from_prompt("help me refactor the auth module")
+        assert "help me" not in result.lower()
+
+    def test_capitalizes_first_letter(self):
+        result = extract_summary_from_prompt("fix the crash")
+        assert result[0].isupper()
+
+    def test_truncates_at_80_chars(self):
+        long_prompt = "fix " + "a" * 100
+        result = extract_summary_from_prompt(long_prompt)
+        assert len(result) <= 80
+
+    def test_takes_first_sentence(self):
+        result = extract_summary_from_prompt("Fix the bug. Also add a feature.")
+        assert "Also add" not in result
+
+    def test_empty_prompt_returns_empty(self):
+        assert extract_summary_from_prompt("") == ""
+
+
+class TestIsDuplicateIssue:
+    def _make_session_with_issues(self, summaries: dict) -> dict:
+        return {
+            "activeIssues": {
+                key: {"summary": summary}
+                for key, summary in summaries.items()
+            }
+        }
+
+    def test_high_overlap_returns_key(self):
+        session = self._make_session_with_issues({"PROJ-1": "Fix login crash on startup"})
+        result = _is_duplicate_issue(session, "fix login crash")
+        assert result == "PROJ-1"
+
+    def test_low_overlap_returns_none(self):
+        session = self._make_session_with_issues({"PROJ-1": "Add dark mode toggle"})
+        result = _is_duplicate_issue(session, "fix database connection error")
+        assert result is None
+
+    def test_exact_match_returns_key(self):
+        session = self._make_session_with_issues({"PROJ-42": "Implement search feature"})
+        result = _is_duplicate_issue(session, "Implement search feature")
+        assert result == "PROJ-42"
+
+    def test_empty_session_returns_none(self):
+        assert _is_duplicate_issue({"activeIssues": {}}, "fix something") is None
+
+    def test_empty_summary_returns_none(self):
+        session = self._make_session_with_issues({"PROJ-1": "Fix login"})
+        assert _is_duplicate_issue(session, "") is None
+
+    def test_issue_without_summary_is_skipped(self):
+        session = {"activeIssues": {"PROJ-1": {}}}
+        assert _is_duplicate_issue(session, "fix login crash") is None
+
+
+class TestAttemptAutoCreate:
+    def _make_env(self, tmp_path, autonomy="A", auto_create=True):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        cfg = {
+            "projectKey": "PROJ",
+            "autonomyLevel": autonomy,
+            "autoCreate": auto_create,
+            "debugLog": False,
+        }
+        (claude_dir / "jira-autopilot.json").write_text(json.dumps(cfg))
+        local_cfg = {"baseUrl": "https://example.atlassian.net", "email": "u@test.com", "apiToken": "tok"}
+        (claude_dir / "jira-autopilot.local.json").write_text(json.dumps(local_cfg))
+        session = {
+            "autonomyLevel": autonomy,
+            "activeIssues": {},
+            "currentIssue": None,
+            "lastParentKey": None,
+        }
+        (claude_dir / "jira-session.json").write_text(json.dumps(session))
+        return str(tmp_path), cfg, session
+
+    def test_autonomy_c_returns_none(self, tmp_path):
+        root, cfg, session = self._make_env(tmp_path, autonomy="C")
+        result = _attempt_auto_create(root, "fix the login bug", session, cfg)
+        assert result is None
+
+    def test_auto_create_false_returns_none(self, tmp_path):
+        root, cfg, session = self._make_env(tmp_path, auto_create=False)
+        result = _attempt_auto_create(root, "fix the login bug", session, cfg)
+        assert result is None
+
+    def test_low_confidence_returns_none(self, tmp_path):
+        root, cfg, session = self._make_env(tmp_path)
+        # Ambiguous prompt with no clear signals → low confidence
+        result = _attempt_auto_create(root, "the thing", session, cfg)
+        assert result is None
+
+    def test_duplicate_returns_existing_key(self, tmp_path):
+        root, cfg, session = self._make_env(tmp_path)
+        session["activeIssues"]["PROJ-10"] = {"summary": "Fix login crash on startup"}
+        result = _attempt_auto_create(root, "fix login crash", session, cfg)
+        assert result is not None
+        assert result["key"] == "PROJ-10"
+        assert result["duplicate"] is True
+
+    def test_success_updates_session(self, tmp_path):
+        root, cfg, session = self._make_env(tmp_path)
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"key": "PROJ-99", "id": "100"}).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = _attempt_auto_create(root, "implement the search feature", session, cfg)
+
+        assert result is not None
+        assert result["key"] == "PROJ-99"
+        assert result["duplicate"] is False
+
+        saved = load_session(root)
+        assert "PROJ-99" in saved["activeIssues"]
+        assert saved["currentIssue"] == "PROJ-99"

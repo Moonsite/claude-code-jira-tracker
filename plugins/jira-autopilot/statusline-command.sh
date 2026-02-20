@@ -162,6 +162,15 @@ PYEOF
       fi
       jira_label="${jira_label} ${C_JIRA_TIME}${time_str}${RESET}"
     fi
+    # Auto-mode indicator
+    if [ "$jira_autonomy" = "A" ]; then
+      jira_label="${jira_label} ${C_ICON}[auto]${RESET}"
+    fi
+    # Issue count when > 1 active
+    issue_count=$(jq '.activeIssues | length' "$jira_session" 2>/dev/null)
+    if [ -n "$issue_count" ] && [ "$issue_count" -gt 1 ] 2>/dev/null; then
+      jira_label="${jira_label} ${C_ICON}(${issue_count})${RESET}"
+    fi
     if [ -n "$pending" ] && [ "$pending" -gt 0 ] 2>/dev/null; then
       jira_label="${jira_label} ${C_JIRA_WARN}(${pending} pending)${RESET}"
     fi

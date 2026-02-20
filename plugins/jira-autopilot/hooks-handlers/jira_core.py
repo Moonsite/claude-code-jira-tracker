@@ -290,6 +290,7 @@ def main():
         "session-end": cmd_session_end,
         "post-worklogs": cmd_post_worklogs,
         "classify-issue": cmd_classify_issue,
+        "auto-create-issue": cmd_auto_create_issue,
         "suggest-parent": cmd_suggest_parent,
         "build-worklog": cmd_build_worklog,
         "debug-log": cmd_debug_log,
@@ -360,6 +361,193 @@ def _detect_issue_from_branch(root: str, cfg: dict) -> str | None:
     return None
 
 
+def _resolve_autonomy(session: dict, cfg: dict) -> str:
+    """Return autonomy letter A/B/C from session or config (handles numeric 1-10 too)."""
+    raw = session.get("autonomyLevel") or cfg.get("autonomyLevel", "C")
+    if isinstance(raw, int) or (isinstance(raw, str) and raw.isdigit()):
+        n = int(raw)
+        if n == 10:
+            return "A"
+        elif n >= 6:
+            return "B"
+        else:
+            return "C"
+    return str(raw).upper() if str(raw).upper() in ("A", "B", "C") else "C"
+
+
+def extract_summary_from_prompt(prompt: str) -> str:
+    """Extract a clean issue summary from a user prompt.
+
+    Strips leading noise verbs, takes the first sentence, capitalizes,
+    and truncates to 80 chars.
+    """
+    if not prompt:
+        return ""
+    # Take first sentence
+    first = re.split(r'[.!?\n]', prompt.strip())[0].strip()
+    # Strip leading noise phrases (case-insensitive)
+    noise = r'^(?:please\s+|can you\s+|could you\s+|i need to\s+|i need you to\s+|i want to\s+|help me\s+|let\'s\s+|let me\s+)+'
+    first = re.sub(noise, '', first, flags=re.IGNORECASE).strip()
+    if not first:
+        return ""
+    # Capitalize first letter
+    first = first[0].upper() + first[1:]
+    return first[:80]
+
+
+def _is_duplicate_issue(session: dict, summary: str) -> "str | None":
+    """Return existing issue key if token overlap with summary exceeds 60%, else None."""
+    if not summary:
+        return None
+    summary_tokens = set(re.findall(r'\w+', summary.lower()))
+    if not summary_tokens:
+        return None
+    for key, data in session.get("activeIssues", {}).items():
+        existing = data.get("summary", "")
+        if not existing:
+            continue
+        existing_tokens = set(re.findall(r'\w+', existing.lower()))
+        if not existing_tokens:
+            continue
+        overlap = len(summary_tokens & existing_tokens) / len(summary_tokens | existing_tokens)
+        if overlap >= 0.60:
+            return key
+    return None
+
+
+def _get_recent_commit_messages(root: str, n: int = 5) -> list:
+    """Return last N git commit messages, empty list on any failure."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", f"-{n}"],
+            capture_output=True, text=True, cwd=root, timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+        lines = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+        # Strip the short hash prefix (7 hex chars + space)
+        messages = [re.sub(r'^[0-9a-f]{7,}\s+', '', line) for line in lines]
+        return [m for m in messages if m]
+    except Exception:
+        return []
+
+
+def _attempt_auto_create(root: str, summary: str, session: dict, cfg: dict) -> "dict | None":
+    """Try to auto-create a Jira issue. Returns result dict or None on failure/skip."""
+    autonomy = _resolve_autonomy(session, cfg)
+    if autonomy == "C":
+        return None
+    if not cfg.get("autoCreate", False):
+        return None
+
+    # Check credentials
+    base_url = get_cred(root, "baseUrl")
+    email = get_cred(root, "email")
+    api_token = get_cred(root, "apiToken")
+    if not (base_url and email and api_token):
+        return None
+
+    clean_summary = extract_summary_from_prompt(summary)
+    if not clean_summary:
+        return None
+
+    # Check duplicate
+    dup_key = _is_duplicate_issue(session, clean_summary)
+    if dup_key:
+        return {"key": dup_key, "summary": clean_summary, "duplicate": True}
+
+    # Classify and check confidence
+    classification = classify_issue(clean_summary)
+    if classification.get("confidence", 0) < 0.65:
+        return None
+
+    project_key = cfg.get("projectKey", "")
+    if not project_key:
+        return None
+
+    # Infer parent
+    parent_key = (
+        session.get("lastParentKey")
+        or session.get("currentIssue")
+        or None
+    )
+
+    issue_type = classification.get("type", "Task")
+    url = f"{base_url.rstrip('/')}/rest/api/3/issue"
+    auth = base64.b64encode(f"{email}:{api_token}".encode()).decode()
+    fields: dict = {
+        "project": {"key": project_key},
+        "summary": clean_summary,
+        "issuetype": {"name": issue_type},
+    }
+    if parent_key:
+        fields["parent"] = {"key": parent_key}
+
+    payload = json.dumps({"fields": fields}).encode()
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Authorization", f"Basic {auth}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            new_key = data.get("key", "")
+            if not new_key:
+                return None
+    except Exception as e:
+        debug_log(f"auto-create error: {e}", category="auto-create")
+        return None
+
+    # Update session
+    session["activeIssues"][new_key] = {
+        "startTime": int(time.time()),
+        "totalSeconds": 0,
+        "paused": False,
+        "summary": clean_summary,
+    }
+    session["currentIssue"] = new_key
+    if parent_key:
+        session["lastParentKey"] = parent_key
+    save_session(root, session)
+
+    debug_log(
+        f"auto-created key={new_key} type={issue_type} parent={parent_key} "
+        f"summary={clean_summary!r} autonomy={autonomy}",
+        category="auto-create",
+        enabled=cfg.get("debugLog", False),
+    )
+
+    return {
+        "key": new_key,
+        "summary": clean_summary,
+        "type": issue_type,
+        "parent": parent_key,
+        "duplicate": False,
+    }
+
+
+def cmd_auto_create_issue(args):
+    """Auto-create a Jira issue from a prompt. Exits silently (no output) on skip.
+
+    Usage: jira_core.py auto-create-issue <root> <prompt_text>
+    """
+    root = args[0] if args else "."
+    prompt = args[1] if len(args) > 1 else ""
+
+    cfg = load_config(root)
+    session = load_session(root)
+    if not session:
+        return
+
+    autonomy = _resolve_autonomy(session, cfg)
+    if autonomy == "C":
+        return  # silent — caller falls back to blocking mode
+
+    result = _attempt_auto_create(root, prompt, session, cfg)
+    if result:
+        print(json.dumps(result))
+
+
 def cmd_session_start(args):
     root = args[0] if args else "."
     _migrate_old_configs(root)
@@ -425,6 +613,19 @@ def cmd_session_start(args):
             category="session-start",
             enabled=cfg.get("debugLog", False),
         )
+    elif _resolve_autonomy(session, cfg) == "A" and cfg.get("autoCreate", False):
+        # Autonomy A + autoCreate: try to seed currentIssue from recent commits
+        commit_msgs = _get_recent_commit_messages(root)
+        if commit_msgs:
+            save_session(root, session)  # save skeleton first so _attempt_auto_create can read it
+            result = _attempt_auto_create(root, commit_msgs[0], session, cfg)
+            if result and not result.get("duplicate"):
+                debug_log(
+                    f"Session start auto-created {result['key']} from commit: {commit_msgs[0]!r}",
+                    category="session-start",
+                    enabled=cfg.get("debugLog", False),
+                )
+                return  # session already saved by _attempt_auto_create
 
     save_session(root, session)
     debug_log(

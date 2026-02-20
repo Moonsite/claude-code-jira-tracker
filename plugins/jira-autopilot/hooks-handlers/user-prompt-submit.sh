@@ -67,6 +67,72 @@ fi
 
 [[ "$MATCHED" -eq 0 ]] && exit 0
 
+# ── Auto-create path (autonomy A/B) ──────────────────────────────────────────
+RESULT=$(python3 "$SCRIPT_DIR/jira_core.py" auto-create-issue "$ROOT" "$PROMPT" 2>/dev/null || true)
+
+if [[ -n "$RESULT" ]]; then
+  IS_DUP=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('duplicate', False))" 2>/dev/null || echo "False")
+  NEW_KEY=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('key',''))" 2>/dev/null || echo "")
+  SUMMARY=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('summary',''))" 2>/dev/null || echo "")
+  PARENT=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('parent') or '')" 2>/dev/null || echo "")
+
+  AUTONOMY=$(python3 -c "
+import json, sys, os
+root = sys.argv[1]
+cfg_path = os.path.join(root, '.claude', 'jira-autopilot.json')
+sess_path = os.path.join(root, '.claude', 'jira-session.json')
+cfg = json.load(open(cfg_path)) if os.path.exists(cfg_path) else {}
+sess = json.load(open(sess_path)) if os.path.exists(sess_path) else {}
+raw = sess.get('autonomyLevel') or cfg.get('autonomyLevel', 'C')
+if isinstance(raw, int) or (isinstance(raw, str) and raw.isdigit()):
+    n = int(raw)
+    print('A' if n == 10 else ('B' if n >= 6 else 'C'))
+else:
+    print(str(raw).upper() if str(raw).upper() in ('A','B','C') else 'C')
+" "$ROOT" 2>/dev/null || echo "C")
+
+  if [[ "$IS_DUP" == "True" ]]; then
+    # Duplicate: A is silent, B shows a notice
+    if [[ "$AUTONOMY" == "B" ]]; then
+      python3 - "$NEW_KEY" <<'PYEOF'
+import json, sys
+key = sys.argv[1]
+msg = f"[jira-autopilot] Continuing work under {key} (already tracked)."
+print(json.dumps({"systemMessage": msg}))
+PYEOF
+    fi
+    exit 0
+  else
+    # New issue created
+    if [[ "$AUTONOMY" == "B" ]]; then
+      python3 - "$NEW_KEY" "$SUMMARY" "$PARENT" <<'PYEOF'
+import json, sys
+key, summary, parent = sys.argv[1], sys.argv[2], sys.argv[3]
+parent_part = f" under {parent}" if parent and parent != "None" else ""
+slug = summary.lower()[:40]
+slug = __import__('re').sub(r'[^a-z0-9]+', '-', slug).strip('-')
+msg = (
+    f"[jira-autopilot] Auto-created {key}{parent_part}: {summary}.\n"
+    f"  Create branch: feature/{key.lower()}-{slug}"
+)
+print(json.dumps({"systemMessage": msg}))
+PYEOF
+    else
+      # Autonomy A: one-line system message with branch instruction
+      python3 - "$NEW_KEY" "$SUMMARY" "$PARENT" <<'PYEOF'
+import json, sys, re
+key, summary, parent = sys.argv[1], sys.argv[2], sys.argv[3]
+parent_part = f" under {parent}" if parent and parent != "None" else ""
+slug = re.sub(r'[^a-z0-9]+', '-', summary.lower()[:40]).strip('-')
+msg = f"Created {key}{parent_part}: {summary}. Create branch feature/{key.lower()}-{slug}."
+print(json.dumps({"systemMessage": msg}))
+PYEOF
+    fi
+    exit 0
+  fi
+fi
+
+# ── C-mode fallback (or no creds / low confidence) ───────────────────────────
 # No active issue — require /jira-start before any code
 if [[ -z "$CURRENT" || "$CURRENT" == "None" ]]; then
   python3 - <<'PYEOF'

@@ -51,12 +51,15 @@ You are configuring the jira-autopilot plugin for this project.
      B (Balanced)
        Show summaries, then auto-proceed after 10 seconds.
        You see what's happening but don't need to approve each step.
+       Issues are created automatically when work intent is detected (with a notice).
 
      A (Autonomous)
        Act silently. Create issues, log time, post worklogs automatically.
        You'll see a one-line confirmation after each action.
+       Issues are created immediately when work intent is detected (confidence ≥ 0.65).
    ```
    Default: **C**. Let the user pick C, B, or A.
+   > **Note:** If you choose A or B, `autoCreate` will be set to `true` — issues are created automatically when work intent is detected.
 
 7. **Accuracy parameter selection** — Explain and let the user choose (1-10):
    ```
@@ -94,7 +97,7 @@ You are configuring the jira-autopilot plugin for this project.
    - Time rounding: derived from accuracy (low=30, medium=15, high=1), but can override
    - Idle threshold: derived from accuracy (low=30, medium=15, high=5), but can override (in minutes)
    - Debug logging: **enabled** (default true during development — logs to `~/.claude/jira-autopilot-debug.log`)
-   - Auto-create issues: false (ask first before creating)
+   - Auto-create issues: true if autonomy A or B, false for C (ask first before creating)
    - Ask if these defaults are OK or if the user wants to change any.
 
 10. **Write config files**:
@@ -111,7 +114,7 @@ You are configuring the jira-autopilot plugin for this project.
        "commitPattern": "{key}-\\d+:",
        "timeRounding": <15>,
        "idleThreshold": <15>,
-       "autoCreate": false,
+       "autoCreate": <true if autonomyLevel is A or B, false otherwise>,
        "logLanguage": "<language>",
        "defaultLabels": ["jira-autopilot"],
        "defaultComponent": null,
