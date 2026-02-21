@@ -526,6 +526,37 @@ def _attempt_auto_create(root: str, summary: str, session: dict, cfg: dict) -> "
     }
 
 
+
+def _claim_null_chunks(session: dict, issue_key: str) -> int:
+    """Retroactively assign null-issueKey work chunks to issue_key.
+
+    Called whenever currentIssue is set for the first time, so that work
+    done before an issue was known gets attributed correctly.
+
+    Returns the count of chunks claimed. Also adds the claimed time to
+    session["activeIssues"][issue_key]["totalSeconds"] if the issue exists there.
+    """
+    claimed = 0
+    total_claimed_seconds = 0
+    for chunk in session.get("workChunks", []):
+        if chunk.get("issueKey") is not None:
+            continue
+        chunk["issueKey"] = issue_key
+        claimed += 1
+        start = chunk.get("startTime", 0)
+        end = chunk.get("endTime", 0)
+        chunk_time = end - start
+        for gap in chunk.get("idleGaps", []):
+            chunk_time -= gap.get("seconds", 0)
+        total_claimed_seconds += max(chunk_time, 0)
+
+    if claimed > 0 and issue_key in session.get("activeIssues", {}):
+        session["activeIssues"][issue_key]["totalSeconds"] = (
+            session["activeIssues"][issue_key].get("totalSeconds", 0) + total_claimed_seconds
+        )
+    return claimed
+
+
 def cmd_auto_create_issue(args):
     """Auto-create a Jira issue from a prompt. Exits silently (no output) on skip.
 

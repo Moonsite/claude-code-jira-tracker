@@ -50,6 +50,7 @@ from jira_core import (
     extract_summary_from_prompt,
     _is_duplicate_issue,
     _attempt_auto_create,
+    _claim_null_chunks,
 )
 
 
@@ -2342,3 +2343,80 @@ class TestBuildWorklogNullIssueKey:
             ])
         result = build_worklog(root, "TEST-1")
         assert result["seconds"] == 1000  # only the attributed chunk
+
+
+class TestClaimNullChunks:
+    def _make_session(self, chunks, active_issues=None):
+        return {
+            "currentIssue": None,
+            "activeIssues": active_issues or {},
+            "workChunks": chunks,
+        }
+
+    def test_assigns_null_chunks_to_issue(self):
+        session = self._make_session([
+            {"id": "c1", "issueKey": None, "startTime": 1000, "endTime": 2000,
+             "filesChanged": ["a.ts"], "activities": [], "idleGaps": []},
+        ])
+        count = _claim_null_chunks(session, "PROJ-1")
+        assert count == 1
+        assert session["workChunks"][0]["issueKey"] == "PROJ-1"
+
+    def test_does_not_touch_attributed_chunks(self):
+        session = self._make_session([
+            {"id": "c1", "issueKey": "PROJ-9", "startTime": 1000, "endTime": 2000,
+             "filesChanged": [], "activities": [], "idleGaps": []},
+        ])
+        count = _claim_null_chunks(session, "PROJ-1")
+        assert count == 0
+        assert session["workChunks"][0]["issueKey"] == "PROJ-9"
+
+    def test_returns_zero_when_no_null_chunks(self):
+        session = self._make_session([])
+        assert _claim_null_chunks(session, "PROJ-1") == 0
+
+    def test_updates_total_seconds_in_active_issue(self):
+        session = self._make_session(
+            chunks=[
+                {"id": "c1", "issueKey": None, "startTime": 1000, "endTime": 2000,
+                 "filesChanged": [], "activities": [], "idleGaps": []},
+            ],
+            active_issues={"PROJ-1": {"startTime": 500, "totalSeconds": 0, "paused": False}},
+        )
+        _claim_null_chunks(session, "PROJ-1")
+        assert session["activeIssues"]["PROJ-1"]["totalSeconds"] == 1000
+
+    def test_accounts_for_idle_gaps(self):
+        session = self._make_session(
+            chunks=[
+                {"id": "c1", "issueKey": None, "startTime": 1000, "endTime": 2000,
+                 "filesChanged": [], "activities": [],
+                 "idleGaps": [{"startTime": 1400, "endTime": 1600, "seconds": 200}]},
+            ],
+            active_issues={"PROJ-1": {"startTime": 500, "totalSeconds": 0, "paused": False}},
+        )
+        _claim_null_chunks(session, "PROJ-1")
+        assert session["activeIssues"]["PROJ-1"]["totalSeconds"] == 800
+
+    def test_accumulates_onto_existing_total_seconds(self):
+        session = self._make_session(
+            chunks=[
+                {"id": "c1", "issueKey": None, "startTime": 0, "endTime": 300,
+                 "filesChanged": [], "activities": [], "idleGaps": []},
+            ],
+            active_issues={"PROJ-1": {"startTime": 0, "totalSeconds": 500, "paused": False}},
+        )
+        _claim_null_chunks(session, "PROJ-1")
+        assert session["activeIssues"]["PROJ-1"]["totalSeconds"] == 800
+
+    def test_no_totalSeconds_update_when_issue_not_in_active_issues(self):
+        """If issue_key not in activeIssues, just assign chunks — no KeyError."""
+        session = self._make_session(
+            chunks=[
+                {"id": "c1", "issueKey": None, "startTime": 0, "endTime": 300,
+                 "filesChanged": [], "activities": [], "idleGaps": []},
+            ],
+        )
+        count = _claim_null_chunks(session, "PROJ-99")
+        assert count == 1
+        assert session["workChunks"][0]["issueKey"] == "PROJ-99"
