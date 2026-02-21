@@ -506,6 +506,14 @@ def _attempt_auto_create(root: str, summary: str, session: dict, cfg: dict) -> "
         "summary": clean_summary,
     }
     session["currentIssue"] = new_key
+    # Retroactively claim work done before this issue was known
+    claimed = _claim_null_chunks(session, new_key)
+    if claimed > 0:
+        debug_log(
+            f"auto-create retroactively claimed {claimed} null chunks for {new_key}",
+            category="auto-create",
+            enabled=cfg.get("debugLog", False),
+        )
     if parent_key:
         session["lastParentKey"] = parent_key
     save_session(root, session)
@@ -639,6 +647,13 @@ def cmd_session_start(args):
             "totalSeconds": 0,
             "paused": False,
         }
+        claimed = _claim_null_chunks(session, branch_issue)
+        if claimed > 0:
+            debug_log(
+                f"branch detection retroactively claimed {claimed} null chunks for {branch_issue}",
+                category="session-start",
+                enabled=cfg.get("debugLog", False),
+            )
         debug_log(
             f"Detected issue from branch: {branch_issue}",
             category="session-start",

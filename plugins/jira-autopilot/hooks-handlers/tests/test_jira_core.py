@@ -2437,3 +2437,91 @@ class TestClaimNullChunks:
         assert count == 2  # only the two null chunks
         assert session["activeIssues"]["PROJ-1"]["totalSeconds"] == 2100  # 100 + 1000 + 1000
         assert session["workChunks"][2]["issueKey"] == "PROJ-99"  # attributed chunk untouched
+
+
+# ── Task 2: Retroactive attribution call sites ────────────────────────────────
+
+class TestAttemptAutoCreateClaimsNullChunks:
+    def _make_env(self, tmp_path, autonomy="A", auto_create=True):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        cfg = {
+            "projectKey": "PROJ",
+            "autonomyLevel": autonomy,
+            "autoCreate": auto_create,
+            "debugLog": False,
+        }
+        (claude_dir / "jira-autopilot.json").write_text(json.dumps(cfg))
+        local_cfg = {"baseUrl": "https://example.atlassian.net", "email": "u@test.com", "apiToken": "tok"}
+        (claude_dir / "jira-autopilot.local.json").write_text(json.dumps(local_cfg))
+        session = {
+            "autonomyLevel": autonomy,
+            "activeIssues": {},
+            "currentIssue": None,
+            "lastParentKey": None,
+            "workChunks": [],
+        }
+        (claude_dir / "jira-session.json").write_text(json.dumps(session))
+        return str(tmp_path), cfg, session
+
+    def test_success_claims_null_chunks(self, tmp_path):
+        """Auto-create should retroactively claim null-issueKey chunks."""
+        root, cfg, session = self._make_env(tmp_path)
+        # Pre-existing null chunk in the session
+        session["workChunks"] = [{
+            "id": "c0", "issueKey": None, "startTime": 100, "endTime": 700,
+            "filesChanged": ["old.ts"], "activities": [], "idleGaps": [],
+        }]
+        (tmp_path / ".claude" / "jira-session.json").write_text(json.dumps(session))
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"key": "PROJ-55", "id": "200"}).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = _attempt_auto_create(root, "implement the search feature", session, cfg)
+
+        assert result is not None
+        assert result["key"] == "PROJ-55"
+
+        saved = load_session(root)
+        # Null chunk should now be attributed to PROJ-55
+        assert saved["workChunks"][0]["issueKey"] == "PROJ-55"
+        # totalSeconds updated (700 - 100 = 600)
+        assert saved["activeIssues"]["PROJ-55"]["totalSeconds"] == 600
+
+
+class TestSessionStartRetroactiveAttribution:
+    def test_branch_detection_claims_null_chunks(self, tmp_path):
+        """cmd_session_start with branch issue should call _claim_null_chunks."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        cfg = {
+            "projectKey": "PROJ",
+            "enabled": True,
+            "autonomyLevel": "C",
+            "autoCreate": False,
+            "debugLog": False,
+            "branchPattern": "^(?:feature|fix)/(PROJ-\\d+)",
+            "accuracy": 5,
+        }
+        (claude_dir / "jira-autopilot.json").write_text(json.dumps(cfg))
+        (claude_dir / "jira-session.json").write_text(json.dumps({
+            "activeIssues": {},
+            "currentIssue": None,
+            "workChunks": [],
+        }))
+
+        with patch("subprocess.run") as mock_run, \
+             patch("jira_core._claim_null_chunks", wraps=_claim_null_chunks) as mock_claim:
+            mock_run.return_value = MagicMock(returncode=0, stdout="feature/PROJ-42\n")
+            cmd_session_start([str(tmp_path)])
+
+        saved = load_session(str(tmp_path))
+        assert saved["currentIssue"] == "PROJ-42"
+        assert "PROJ-42" in saved["activeIssues"]
+        # Verify _claim_null_chunks was called with the detected branch issue
+        mock_claim.assert_called_once()
+        call_args = mock_claim.call_args
+        assert call_args[0][1] == "PROJ-42"  # second positional arg is issue_key
