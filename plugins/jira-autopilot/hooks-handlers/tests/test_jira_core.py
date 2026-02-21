@@ -2610,3 +2610,66 @@ class TestSessionEndNullRescue:
         arch = self._get_archived_session(tmp_path)
         pending = [p for p in arch.get("pendingWorklogs", []) if p.get("status") == "unattributed"]
         assert len(pending) == 0
+
+
+class TestFlushPeriodicUnattributed:
+    """Periodic flush must process null-issueKey chunks even without active issues."""
+
+    def _setup(self, tmp_path, autonomy="C", auto_create=False):
+        from pathlib import Path
+        import json, time
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        cfg = {
+            "timeRounding": 1, "accuracy": 10, "worklogInterval": 1,
+            "autoCreate": auto_create, "autonomyLevel": autonomy,
+            "debugLog": False, "projectKey": "PROJ",
+        }
+        (claude_dir / "jira-autopilot.json").write_text(json.dumps(cfg))
+        return str(tmp_path), cfg
+
+    def test_unattributed_chunks_saved_as_pending_no_active_issues(self, tmp_path):
+        import time, json
+        from pathlib import Path
+        root, cfg = self._setup(tmp_path, autonomy="C")
+        now = int(time.time())
+        session = {
+            "activeIssues": {},
+            "currentIssue": None,
+            "workChunks": [
+                {"id": "c1", "issueKey": None, "startTime": now - 200, "endTime": now - 100,
+                 "filesChanged": ["a.ts"], "activities": [], "idleGaps": []},
+            ],
+            "pendingWorklogs": [],
+            "lastWorklogTime": now - 200,
+            "autonomyLevel": "C",
+            "accuracy": 10,
+        }
+        (Path(tmp_path) / ".claude" / "jira-session.json").write_text(json.dumps(session))
+        _flush_periodic_worklogs(root, session, cfg)
+        # In C mode, should save as unattributed pending
+        saved = load_session(root)
+        pending = [p for p in saved.get("pendingWorklogs", []) if p.get("status") == "unattributed"]
+        assert len(pending) == 1
+        assert pending[0]["issueKey"] is None
+        assert pending[0]["seconds"] > 0
+
+    def test_no_unattributed_flush_when_no_null_chunks(self, tmp_path):
+        import time, json
+        from pathlib import Path
+        root, cfg = self._setup(tmp_path)
+        now = int(time.time())
+        session = {
+            "activeIssues": {},
+            "currentIssue": None,
+            "workChunks": [],
+            "pendingWorklogs": [],
+            "lastWorklogTime": now - 200,
+            "autonomyLevel": "C",
+            "accuracy": 10,
+        }
+        (Path(tmp_path) / ".claude" / "jira-session.json").write_text(json.dumps(session))
+        _flush_periodic_worklogs(root, session, cfg)
+        saved = load_session(root)
+        pending = [p for p in saved.get("pendingWorklogs", []) if p.get("status") == "unattributed"]
+        assert len(pending) == 0

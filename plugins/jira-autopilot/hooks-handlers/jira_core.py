@@ -1050,10 +1050,9 @@ def _flush_periodic_worklogs(root: str, session: dict, cfg: dict):
     time_rounding = cfg.get("timeRounding", 15)
     active_issues = session.get("activeIssues", {})
 
-    if not active_issues:
-        return
-
     flushed_any = False
+
+    # --- Flush attributed (issued) work ---
     for issue_key in list(active_issues.keys()):
         worklog = build_worklog(root, issue_key)
         raw_seconds = worklog["seconds"]
@@ -1077,6 +1076,38 @@ def _flush_periodic_worklogs(root: str, session: dict, cfg: dict):
             category="periodic-worklog", enabled=debug,
         )
 
+    # --- Flush unattributed (null-issueKey) work ---
+    null_chunks = [c for c in session.get("workChunks", []) if c.get("issueKey") is None]
+    if null_chunks:
+        unattr = _build_unattributed_worklog(session)
+        if unattr["seconds"] > 0:
+            if autonomy == "A" and cfg.get("autoCreate", False):
+                commit_msgs = _get_recent_commit_messages(root)
+                summary_hint = commit_msgs[0] if commit_msgs else unattr["summary"]
+                result = _attempt_auto_create(root, summary_hint, session, cfg)
+                if result:
+                    flushed_any = True
+                    debug_log(
+                        f"periodic auto-created {result['key']} for unattributed work",
+                        category="periodic-worklog", enabled=debug,
+                    )
+            if not flushed_any or autonomy != "A":
+                # B/C or auto-create failed: save as pending
+                rounded = _round_seconds(unattr["seconds"], time_rounding, accuracy)
+                entry = {
+                    "issueKey": None,
+                    "seconds": rounded,
+                    "summary": unattr["summary"],
+                    "rawFacts": unattr["rawFacts"],
+                    "status": "unattributed",
+                }
+                session.setdefault("pendingWorklogs", []).append(entry)
+                flushed_any = True
+                debug_log(
+                    f"periodic saved {rounded}s unattributed",
+                    category="periodic-worklog", enabled=debug,
+                )
+
     if not flushed_any:
         return
 
@@ -1085,6 +1116,7 @@ def _flush_periodic_worklogs(root: str, session: dict, cfg: dict):
     session["workChunks"] = [
         c for c in session.get("workChunks", [])
         if c.get("issueKey") not in processed_keys
+        and c.get("issueKey") is not None  # also clear null chunks that were flushed
     ]
     session["lastWorklogTime"] = now
     save_session(root, session)
