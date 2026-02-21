@@ -828,10 +828,22 @@ def _handle_task_event(root: str, session: dict, tool_name: str,
     # Subject can come from response (TaskCreate) or input (TaskUpdate)
     subject = resp.get("subject", "") or tool_input.get("subject", "")
     status = resp.get("status", "") or tool_input.get("status", "")
-    if not task_id or not status:
+    if not task_id:
         return
     debug = cfg.get("debugLog", False)
     active_tasks = session.setdefault("activeTasks", {})
+    task_subjects = session.setdefault("taskSubjects", {})
+
+    # Cache subject from TaskCreate so TaskUpdate can look it up
+    if tool_name == "TaskCreate" and task_id and subject:
+        task_subjects[task_id] = subject
+
+    # For TaskUpdate, look up cached subject if none provided
+    if not subject and task_id in task_subjects:
+        subject = task_subjects[task_id]
+
+    if not status:
+        return
     if status == "in_progress" and task_id not in active_tasks:
         active_tasks[task_id] = {
             "subject": subject,
@@ -1209,9 +1221,12 @@ def cmd_classify_issue(args):
 def build_worklog(root: str, issue_key: str) -> dict:
     """Build worklog summary from work chunks for an issue."""
     session = load_session(root)
+    active_keys = set(session.get("activeIssues", {}).keys())
+    sole_active = len(active_keys) == 1 and issue_key in active_keys
     chunks = [
         c for c in session.get("workChunks", [])
         if c.get("issueKey") == issue_key
+        or (sole_active and c.get("issueKey") is None)
     ]
 
     all_files = []
@@ -1251,7 +1266,8 @@ def build_worklog(root: str, issue_key: str) -> dict:
             file_list += f" +{rest}"
         summary = file_list
     else:
-        summary = "עבודה על המשימה"  # fallback — language-neutral placeholder
+        lang = get_log_language(root)
+        summary = "עבודה על המשימה" if lang == "Hebrew" else "Work on task"
 
     return {
         "issueKey": issue_key,

@@ -2297,3 +2297,48 @@ class TestAttemptAutoCreate:
         saved = load_session(root)
         assert "PROJ-99" in saved["activeIssues"]
         assert saved["currentIssue"] == "PROJ-99"
+
+
+# ── Build worklog: null-issueKey attribution ──────────────────────────────────
+
+class TestBuildWorklogNullIssueKey:
+    def _setup(self, tmp_path, active_issues, chunks):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        import json as _json
+        (claude_dir / "jira-autopilot.json").write_text(_json.dumps({"debugLog": False}))
+        session = {
+            "currentIssue": list(active_issues.keys())[0] if active_issues else None,
+            "activeIssues": active_issues,
+            "workChunks": chunks,
+        }
+        (claude_dir / "jira-session.json").write_text(_json.dumps(session))
+        return str(tmp_path)
+
+    def test_null_chunks_included_when_sole_active_issue(self, tmp_path):
+        root = self._setup(tmp_path,
+            active_issues={"TEST-1": {"startTime": 1000, "totalSeconds": 0}},
+            chunks=[
+                {"id": "c1", "issueKey": "TEST-1", "startTime": 1000, "endTime": 2000,
+                 "filesChanged": ["a.ts"], "activities": [], "idleGaps": []},
+                {"id": "c2", "issueKey": None, "startTime": 2000, "endTime": 3000,
+                 "filesChanged": ["b.ts"], "activities": [], "idleGaps": []},
+            ])
+        result = build_worklog(root, "TEST-1")
+        assert result["seconds"] == 2000  # both chunks counted
+        assert "b.ts" in result["rawFacts"]["files"]
+
+    def test_null_chunks_excluded_when_multiple_active_issues(self, tmp_path):
+        root = self._setup(tmp_path,
+            active_issues={
+                "TEST-1": {"startTime": 1000, "totalSeconds": 0},
+                "TEST-2": {"startTime": 1000, "totalSeconds": 0},
+            },
+            chunks=[
+                {"id": "c1", "issueKey": "TEST-1", "startTime": 1000, "endTime": 2000,
+                 "filesChanged": [], "activities": [], "idleGaps": []},
+                {"id": "c2", "issueKey": None, "startTime": 2000, "endTime": 3000,
+                 "filesChanged": [], "activities": [], "idleGaps": []},
+            ])
+        result = build_worklog(root, "TEST-1")
+        assert result["seconds"] == 1000  # only the attributed chunk
