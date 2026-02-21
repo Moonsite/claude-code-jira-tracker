@@ -2525,3 +2525,88 @@ class TestSessionStartRetroactiveAttribution:
         mock_claim.assert_called_once()
         call_args = mock_claim.call_args
         assert call_args[0][1] == "PROJ-42"  # second positional arg is issue_key
+
+
+class TestSessionEndNullRescue:
+    """Session-end must rescue unattributed (null-issueKey) chunks."""
+
+    def _setup(self, tmp_path, autonomy="C", auto_create=False, chunks=None, has_creds=False):
+        from pathlib import Path
+        import json, time
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        cfg = {
+            "projectKey": "PROJ",
+            "autonomyLevel": autonomy,
+            "autoCreate": auto_create,
+            "debugLog": False,
+            "timeRounding": 1,
+            "accuracy": 10,
+        }
+        (claude_dir / "jira-autopilot.json").write_text(json.dumps(cfg))
+        if has_creds:
+            local_cfg = {"baseUrl": "https://x.atlassian.net", "email": "u@test.com", "apiToken": "tok"}
+            (claude_dir / "jira-autopilot.local.json").write_text(json.dumps(local_cfg))
+        now = int(time.time())
+        session = {
+            "sessionId": "test-rescue",
+            "autonomyLevel": autonomy,
+            "accuracy": 10,
+            "activeIssues": {},
+            "currentIssue": None,
+            "workChunks": chunks or [],
+            "pendingWorklogs": [],
+            "activityBuffer": [],
+            "lastWorklogTime": now,
+        }
+        (claude_dir / "jira-session.json").write_text(json.dumps(session))
+        return str(tmp_path)
+
+    def _get_archived_session(self, tmp_path):
+        import json, glob, os
+        archives = glob.glob(os.path.join(str(tmp_path), ".claude", "jira-sessions", "*.json"))
+        assert len(archives) == 1, f"Expected 1 archive, found {len(archives)}: {archives}"
+        return json.load(open(archives[0]))
+
+    def test_null_chunks_saved_as_pending_unattributed_for_c_mode(self, tmp_path):
+        import time
+        now = int(time.time())
+        root = self._setup(tmp_path, autonomy="C", chunks=[
+            {"id": "c1", "issueKey": None, "startTime": now - 300, "endTime": now - 100,
+             "filesChanged": ["a.ts"], "activities": [], "idleGaps": []},
+        ])
+        cmd_session_end([root])
+        arch = self._get_archived_session(tmp_path)
+        pending = [p for p in arch.get("pendingWorklogs", []) if p.get("status") == "unattributed"]
+        assert len(pending) == 1
+        assert pending[0]["issueKey"] is None
+        assert pending[0]["seconds"] > 0
+
+    def test_null_chunks_pending_for_b_mode(self, tmp_path):
+        import time
+        now = int(time.time())
+        root = self._setup(tmp_path, autonomy="B", chunks=[
+            {"id": "c1", "issueKey": None, "startTime": now - 200, "endTime": now - 50,
+             "filesChanged": [], "activities": [], "idleGaps": []},
+        ])
+        cmd_session_end([root])
+        arch = self._get_archived_session(tmp_path)
+        pending = [p for p in arch.get("pendingWorklogs", []) if p.get("status") == "unattributed"]
+        assert len(pending) == 1
+
+    def test_no_pending_when_null_chunks_have_zero_seconds(self, tmp_path):
+        root = self._setup(tmp_path, chunks=[
+            {"id": "c1", "issueKey": None, "startTime": 100, "endTime": 100,
+             "filesChanged": [], "activities": [], "idleGaps": []},
+        ])
+        cmd_session_end([root])
+        arch = self._get_archived_session(tmp_path)
+        pending = [p for p in arch.get("pendingWorklogs", []) if p.get("status") == "unattributed"]
+        assert len(pending) == 0
+
+    def test_no_rescue_when_no_null_chunks(self, tmp_path):
+        root = self._setup(tmp_path)  # empty chunks
+        cmd_session_end([root])
+        arch = self._get_archived_session(tmp_path)
+        pending = [p for p in arch.get("pendingWorklogs", []) if p.get("status") == "unattributed"]
+        assert len(pending) == 0

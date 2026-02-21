@@ -1327,6 +1327,45 @@ def build_worklog(root: str, issue_key: str) -> dict:
     }
 
 
+
+def _build_unattributed_worklog(session: dict) -> dict:
+    """Build a worklog summary from all null-issueKey work chunks.
+
+    Used at session-end and periodic flush to rescue unattributed work.
+    """
+    chunks = [c for c in session.get("workChunks", []) if c.get("issueKey") is None]
+    all_files, all_commands, total_activities, total_seconds = [], [], 0, 0
+    for chunk in chunks:
+        all_files.extend(chunk.get("filesChanged", []))
+        for act in chunk.get("activities", []):
+            total_activities += 1
+            if act.get("command"):
+                all_commands.append(_sanitize_command(act["command"]))
+        start = chunk.get("startTime", 0)
+        end = chunk.get("endTime", 0)
+        chunk_time = end - start
+        for gap in chunk.get("idleGaps", []):
+            chunk_time -= gap.get("seconds", 0)
+        total_seconds += max(chunk_time, 0)
+    unique_files = list(dict.fromkeys(all_files))
+    file_basenames = [os.path.basename(f) for f in unique_files if f]
+    if file_basenames:
+        shown = file_basenames[:8]
+        rest = len(file_basenames) - len(shown)
+        summary = ", ".join(shown) + (f" +{rest}" if rest else "")
+    else:
+        summary = "Unattributed work"
+    return {
+        "seconds": total_seconds,
+        "summary": summary,
+        "rawFacts": {
+            "files": unique_files,
+            "commands": list(dict.fromkeys(all_commands)),
+            "activityCount": total_activities,
+        },
+        "chunkCount": len(chunks),
+    }
+
 def cmd_build_worklog(args):
     root = args[0] if args else "."
     issue_key = args[1] if len(args) > 1 else ""
@@ -1451,7 +1490,55 @@ def cmd_session_end(args):
             category="session-end", enabled=debug,
         )
 
-    # Archive the full session snapshot BEFORE clearing chunks — preserves
+    # ── Rescue unattributed (null-issueKey) work ─────────────────────────────
+    null_chunks = [c for c in session.get("workChunks", []) if c.get("issueKey") is None]
+    if null_chunks:
+        unattr = _build_unattributed_worklog(session)
+        raw_seconds = unattr["seconds"]
+        debug_log(
+            f"unattributed chunks={len(null_chunks)} raw={raw_seconds}s",
+            category="session-end", enabled=debug,
+        )
+        if raw_seconds > 0:
+            autonomy = _resolve_autonomy(session, cfg)
+            if autonomy == "A" and cfg.get("autoCreate", False):
+                commit_msgs = _get_recent_commit_messages(root)
+                summary_hint = commit_msgs[0] if commit_msgs else unattr["summary"]
+                result = _attempt_auto_create(root, summary_hint, session, cfg)
+                if result and not result.get("duplicate"):
+                    debug_log(
+                        f"session-end auto-created {result['key']} for {raw_seconds}s unattributed",
+                        category="session-end", enabled=debug,
+                    )
+                    session = load_session(root)  # reload since _attempt_auto_create saved
+                else:
+                    # Auto-create failed or was disabled — fall back to pending
+                    rounded = _round_seconds(raw_seconds, time_rounding, accuracy)
+                    entry = {
+                        "issueKey": None,
+                        "seconds": rounded,
+                        "summary": unattr["summary"],
+                        "rawFacts": unattr["rawFacts"],
+                        "status": "unattributed",
+                    }
+                    session.setdefault("pendingWorklogs", []).append(entry)
+            else:
+                # B/C: save as pending unattributed for /jira-approve
+                rounded = _round_seconds(raw_seconds, time_rounding, accuracy)
+                entry = {
+                    "issueKey": None,
+                    "seconds": rounded,
+                    "summary": unattr["summary"],
+                    "rawFacts": unattr["rawFacts"],
+                    "status": "unattributed",
+                }
+                session.setdefault("pendingWorklogs", []).append(entry)
+                debug_log(
+                    f"session-end saved {rounded}s as pendingUnattributed",
+                    category="session-end", enabled=debug,
+                )
+
+        # Archive the full session snapshot BEFORE clearing chunks — preserves
     # complete work history for /jira-summary and other tooling that reads archives.
     archive_dir = os.path.join(root, ".claude", "jira-sessions")
     os.makedirs(archive_dir, exist_ok=True)
