@@ -23,6 +23,7 @@ LOCAL_CONFIG_NAME = "jira-autopilot.local.json"
 GLOBAL_CONFIG_PATH = Path.home() / ".claude" / "jira-autopilot.global.json"
 SESSION_NAME = "jira-session.json"
 DEBUG_LOG_PATH = Path.home() / ".claude" / "jira-autopilot-debug.log"
+API_LOG_PATH = Path.home() / ".claude" / "jira-autopilot-api.log"
 MAX_LOG_SIZE = 1_000_000  # 1MB
 MAX_WORKLOG_SECONDS = 14400  # 4 hours — sanity cap for a single worklog
 STALE_ISSUE_SECONDS = 86400  # 24 hours — threshold for stale issue cleanup
@@ -145,6 +146,101 @@ def debug_log(message: str, category: str = "general", enabled: bool = True,
         f.write(line + "\n")
 
 
+def _log_api_call(method: str, path: str, status: int, elapsed_ms: int,
+                  detail: str = "", log_path: str = None):
+    """Always-on API call logger. Writes to ~/.claude/jira-autopilot-api.log."""
+    env_path = os.environ.get("JIRA_AUTOPILOT_API_LOG")
+    p = Path(log_path) if log_path else (Path(env_path) if env_path else API_LOG_PATH)
+    # Rotate if too large
+    if p.exists() and p.stat().st_size > MAX_LOG_SIZE:
+        backup = p.with_suffix(".log.1")
+        if backup.exists():
+            backup.unlink()
+        p.rename(backup)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] [api] {method} {path} status={status} time={elapsed_ms}ms"
+    if detail:
+        line += f" {detail}"
+    with open(p, "a") as f:
+        f.write(line + "\n")
+
+
+# ── AI Enrichment ─────────────────────────────────────────────────────
+
+def _enrich_summary_via_ai(raw_facts: dict, language: str, api_key: str) -> str:
+    """Call Anthropic API (Haiku) to produce a concise worklog description.
+
+    Returns enriched text or "" on any failure.
+    """
+    files = raw_facts.get("files", [])
+    commands = raw_facts.get("commands", [])
+    activity_count = raw_facts.get("activityCount", 0)
+
+    file_basenames = [os.path.basename(f) for f in files if f][:10]
+    cmd_list = commands[:5]
+
+    facts_text = (
+        f"Files: {', '.join(file_basenames) if file_basenames else 'none'}\n"
+        f"Commands: {', '.join(cmd_list) if cmd_list else 'none'}\n"
+        f"Activity count: {activity_count}"
+    )
+
+    prompt = (
+        f"Write a concise Jira worklog description (1-2 sentences, max 120 chars) "
+        f"in {language} summarizing the work done. "
+        f"Use professional tone, no markdown, no bullet points.\n\n"
+        f"Facts:\n{facts_text}"
+    )
+
+    payload = json.dumps({
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 150,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload, method="POST",
+    )
+    req.add_header("x-api-key", api_key)
+    req.add_header("anthropic-version", "2023-06-01")
+    req.add_header("Content-Type", "application/json")
+
+    start_ts = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            elapsed_ms = int((time.time() - start_ts) * 1000)
+            data = json.loads(resp.read())
+            text = data.get("content", [{}])[0].get("text", "").strip()
+            _log_api_call("POST", "/v1/messages", resp.status, elapsed_ms,
+                          f"model=haiku chars={len(text)}")
+            return text
+    except urllib.error.HTTPError as e:
+        elapsed_ms = int((time.time() - start_ts) * 1000)
+        _log_api_call("POST", "/v1/messages", e.code, elapsed_ms,
+                      f"error={e.reason}")
+        return ""
+    except Exception as e:
+        elapsed_ms = int((time.time() - start_ts) * 1000)
+        _log_api_call("POST", "/v1/messages", 0, elapsed_ms,
+                      f"error={type(e).__name__}")
+        return ""
+
+
+def _maybe_enrich_worklog_summary(root: str, raw_facts: dict, fallback_summary: str) -> str:
+    """Enrich worklog summary via AI if anthropicApiKey is configured.
+
+    Returns fallback_summary if no key or on API failure.
+    """
+    api_key = get_cred(root, "anthropicApiKey")
+    if not api_key:
+        return fallback_summary
+    language = get_log_language(root)
+    enriched = _enrich_summary_via_ai(raw_facts, language, api_key)
+    return enriched if enriched else fallback_summary
+
+
 # ── CLI Dispatcher ─────────────────────────────────────────────────────────
 
 def cmd_create_issue(args):
@@ -203,18 +299,28 @@ def cmd_create_issue(args):
     req.add_header("Authorization", f"Basic {auth}")
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json")
+    start_ts = time.time()
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
+            elapsed_ms = int((time.time() - start_ts) * 1000)
             data = json.loads(resp.read())
             key = data.get("key", "")
+            _log_api_call("POST", "/rest/api/3/issue", resp.status, elapsed_ms,
+                          f"key={key}")
             print(json.dumps({"key": key, "id": data.get("id", "")}))
     except urllib.error.HTTPError as e:
+        elapsed_ms = int((time.time() - start_ts) * 1000)
         body = e.read().decode(errors="replace")
+        _log_api_call("POST", "/rest/api/3/issue", e.code, elapsed_ms,
+                      f"error={e.reason}")
         debug_log(f"create-issue HTTP {e.code} {e.reason}: {body[:200]}",
                   category="jira-api")
         print(f"Error: HTTP {e.code} {e.reason}: {body[:200]}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
+        elapsed_ms = int((time.time() - start_ts) * 1000)
+        _log_api_call("POST", "/rest/api/3/issue", 0, elapsed_ms,
+                      f"error={type(e).__name__}")
         debug_log(f"create-issue error: {e}", category="jira-api")
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -244,10 +350,15 @@ def cmd_get_issue(args):
     req = urllib.request.Request(url, method="GET")
     req.add_header("Authorization", f"Basic {auth}")
     req.add_header("Accept", "application/json")
+    api_path = f"/rest/api/3/issue/{issue_key}"
+    start_ts = time.time()
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
+            elapsed_ms = int((time.time() - start_ts) * 1000)
             data = json.loads(resp.read())
             fields = data.get("fields", {})
+            _log_api_call("GET", api_path, resp.status, elapsed_ms,
+                          f"key={issue_key}")
             print(json.dumps({
                 "key": data.get("key"),
                 "summary": fields.get("summary"),
@@ -256,10 +367,14 @@ def cmd_get_issue(args):
                 "parent": fields.get("parent", {}).get("key") if fields.get("parent") else None,
             }))
     except urllib.error.HTTPError as e:
+        elapsed_ms = int((time.time() - start_ts) * 1000)
+        _log_api_call("GET", api_path, e.code, elapsed_ms, f"error={e.reason}")
         debug_log(f"get-issue HTTP {e.code} {e.reason}", category="jira-api")
         print(f"Error: HTTP {e.code} {e.reason}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
+        elapsed_ms = int((time.time() - start_ts) * 1000)
+        _log_api_call("GET", api_path, 0, elapsed_ms, f"error={type(e).__name__}")
         debug_log(f"get-issue error: {e}", category="jira-api")
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -505,13 +620,20 @@ def _attempt_auto_create(root: str, summary: str, session: dict, cfg: dict) -> "
     req.add_header("Authorization", f"Basic {auth}")
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json")
+    start_ts = time.time()
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
+            elapsed_ms = int((time.time() - start_ts) * 1000)
             data = json.loads(resp.read())
             new_key = data.get("key", "")
+            _log_api_call("POST", "/rest/api/3/issue", resp.status, elapsed_ms,
+                          f"auto-create key={new_key}")
             if not new_key:
                 return None
     except Exception as e:
+        elapsed_ms = int((time.time() - start_ts) * 1000)
+        _log_api_call("POST", "/rest/api/3/issue", 0, elapsed_ms,
+                      f"auto-create error={type(e).__name__}")
         debug_log(f"auto-create error: {e}", category="auto-create")
         return None
 
@@ -839,41 +961,9 @@ def cmd_log_activity(args):
     )
 
 
-def _create_jira_issue(base_url: str, email: str, api_token: str,
-                        project_key: str, summary: str, parent_key: str) -> "str | None":
-    """Create a Jira sub-task under parent_key. Returns new issue key or None."""
-    url = f"{base_url.rstrip('/')}/rest/api/3/issue"
-    auth = base64.b64encode(f"{email}:{api_token}".encode()).decode()
-    payload = json.dumps({
-        "fields": {
-            "project": {"key": project_key},
-            "parent": {"key": parent_key},
-            "summary": summary,
-            "issuetype": {"name": "Subtask"},
-        }
-    }).encode()
-    req = urllib.request.Request(url, data=payload, method="POST")
-    req.add_header("Authorization", f"Basic {auth}")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-            return data.get("key")
-    except urllib.error.HTTPError as e:
-        debug_log(f"create_issue HTTP error status={e.code} reason={e.reason} "
-                  f"parent={parent_key} project={project_key}",
-                  category="jira-api")
-        return None
-    except Exception as e:
-        debug_log(f"create_issue error={type(e).__name__}: {e}",
-                  category="jira-api")
-        return None
-
 
 def _log_task_time(root: str, session: dict, cfg: dict, subject: str, seconds: int):
-    """Log time for a completed task to a sub-issue (accuracy>=8) or the parent issue."""
-    accuracy = session.get("accuracy", cfg.get("accuracy", 5))
+    """Log time for a completed task to the parent issue."""
     base_url = get_cred(root, "baseUrl")
     email = get_cred(root, "email")
     api_token = get_cred(root, "apiToken")
@@ -881,19 +971,10 @@ def _log_task_time(root: str, session: dict, cfg: dict, subject: str, seconds: i
     debug = cfg.get("debugLog", False)
     if not (base_url and email and api_token):
         return
-    if accuracy >= 8 and current_issue:
-        project_key = cfg.get("projectKey", current_issue.split("-")[0])
-        new_key = _create_jira_issue(base_url, email, api_token, project_key, subject, current_issue)
-        if new_key:
-            post_worklog_to_jira(base_url, email, api_token, new_key, seconds, subject)
-            debug_log(
-                f"task='{subject}' created={new_key} logged={seconds}s",
-                category="task-worklog",
-                enabled=debug,
-            )
-            return
     if current_issue:
-        post_worklog_to_jira(base_url, email, api_token, current_issue, seconds, subject)
+        enriched = _maybe_enrich_worklog_summary(
+            root, {"files": [], "commands": [], "activityCount": 0}, subject)
+        post_worklog_to_jira(base_url, email, api_token, current_issue, seconds, enriched)
         debug_log(
             f"task='{subject}' logged={seconds}s to {current_issue}",
             category="task-worklog",
@@ -952,8 +1033,7 @@ def _is_planning_skill(skill_name: str) -> bool:
 
 def _log_planning_time(root: str, session: dict, cfg: dict,
                         subject: str, seconds: int, issue_key: "str | None" = None):
-    """Log planning time to a Jira sub-issue (accuracy>=8) or the target issue."""
-    accuracy = session.get("accuracy", cfg.get("accuracy", 5))
+    """Log planning time to the target Jira issue."""
     base_url = get_cred(root, "baseUrl")
     email = get_cred(root, "email")
     api_token = get_cred(root, "apiToken")
@@ -964,15 +1044,9 @@ def _log_planning_time(root: str, session: dict, cfg: dict,
         debug_log(f"planning time skipped — no creds or target issue",
                   category="planning", enabled=debug)
         return
-    if accuracy >= 8:
-        project_key = cfg.get("projectKey", target.split("-")[0])
-        new_key = _create_jira_issue(base_url, email, api_token, project_key, subject, target)
-        if new_key:
-            post_worklog_to_jira(base_url, email, api_token, new_key, seconds, subject)
-            debug_log(f"planning='{subject}' created={new_key} logged={seconds}s",
-                      category="planning", enabled=debug)
-            return
-    post_worklog_to_jira(base_url, email, api_token, target, seconds, subject)
+    enriched = _maybe_enrich_worklog_summary(
+        root, {"files": [], "commands": [], "activityCount": 0}, subject)
+    post_worklog_to_jira(base_url, email, api_token, target, seconds, enriched)
     debug_log(f"planning='{subject}' logged={seconds}s to {target}",
               category="planning", enabled=debug)
 
@@ -1095,10 +1169,11 @@ def _flush_periodic_worklogs(root: str, session: dict, cfg: dict):
             continue
 
         rounded = _round_seconds(raw_seconds, time_rounding, accuracy)
+        summary = _maybe_enrich_worklog_summary(root, worklog["rawFacts"], worklog["summary"])
         entry = {
             "issueKey": issue_key,
             "seconds": rounded,
-            "summary": worklog["summary"],
+            "summary": summary,
             "rawFacts": worklog["rawFacts"],
             "status": "pending" if autonomy == "C" else "approved",
         }
@@ -1513,11 +1588,12 @@ def cmd_session_end(args):
             continue
 
         rounded = _round_seconds(raw_seconds, time_rounding, accuracy)
+        summary = _maybe_enrich_worklog_summary(root, worklog["rawFacts"], worklog["summary"])
 
         entry = {
             "issueKey": issue_key,
             "seconds": rounded,
-            "summary": worklog["summary"],
+            "summary": summary,
             "rawFacts": worklog["rawFacts"],
             "status": "pending" if autonomy == "C" else "approved",
         }
@@ -1662,15 +1738,26 @@ def post_worklog_to_jira(base_url: str, email: str, api_token: str,
     req.add_header("Authorization", f"Basic {auth}")
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json")
+    api_path = f"/rest/api/3/issue/{issue_key}/worklog"
+    start_ts = time.time()
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
+            elapsed_ms = int((time.time() - start_ts) * 1000)
+            _log_api_call("POST", api_path, resp.status, elapsed_ms,
+                          f"issue={issue_key} seconds={seconds}")
             return resp.status in (200, 201)
     except urllib.error.HTTPError as e:
+        elapsed_ms = int((time.time() - start_ts) * 1000)
+        _log_api_call("POST", api_path, e.code, elapsed_ms,
+                      f"issue={issue_key} error={e.reason}")
         debug_log(f"post_worklog HTTP error status={e.code} reason={e.reason} "
                   f"issue={issue_key} seconds={seconds}",
                   category="jira-api")
         return False
     except Exception as e:
+        elapsed_ms = int((time.time() - start_ts) * 1000)
+        _log_api_call("POST", api_path, 0, elapsed_ms,
+                      f"issue={issue_key} error={type(e).__name__}")
         debug_log(f"post_worklog error={type(e).__name__}: {e} "
                   f"issue={issue_key} seconds={seconds}",
                   category="jira-api")
