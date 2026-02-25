@@ -737,12 +737,8 @@ def _auto_setup_from_global(root: str) -> dict:
     if not gcfg.get("apiToken") or not gcfg.get("baseUrl"):
         return {}
 
-    # Detect project key from git commits/branches
-    project_key = _detect_project_key_from_git(root)
-    if not project_key:
-        debug_log("Auto-setup: no project key detected from git",
-                  category="session-start")
-        return {}
+    # Detect project key from git commits/branches (may be None for non-git dirs)
+    project_key = _detect_project_key_from_git(root) or ""
 
     cfg = {
         "projectKey": project_key,
@@ -750,8 +746,8 @@ def _auto_setup_from_global(root: str) -> dict:
         "enabled": True,
         "autonomyLevel": "A",
         "accuracy": 10,
-        "branchPattern": f"^(?:feature|fix|hotfix|chore|docs)/({re.escape(project_key)}-\\d+)",
-        "commitPattern": f"{re.escape(project_key)}-\\d+:",
+        "branchPattern": f"^(?:feature|fix|hotfix|chore|docs)/({re.escape(project_key)}-\\d+)" if project_key else "",
+        "commitPattern": f"{re.escape(project_key)}-\\d+:" if project_key else "",
         "timeRounding": 1,
         "idleThreshold": 5,
         "autoCreate": True,
@@ -776,7 +772,7 @@ def _auto_setup_from_global(root: str) -> dict:
         with open(local_path, "w") as f:
             json.dump(local_cfg, f, indent=2)
 
-    debug_log(f"Auto-setup: created config for project {project_key}",
+    debug_log(f"Auto-setup: created config for project {project_key or '(no key detected)'}",
               category="session-start")
     return cfg
 
