@@ -1,9 +1,15 @@
 #!/bin/bash
 # Shared utilities for jira-autopilot hooks
 
-# Find project root by walking up from CLAUDE_PROJECT_DIR (or CWD) looking for .git
+# Find project root: prefer CLAUDE_PROJECT_DIR, then walk up looking for .git
 find_project_root() {
-  local dir="${CLAUDE_PROJECT_DIR:-$PWD}"
+  # If Claude Code tells us the project dir, trust it (works for non-git dirs too)
+  if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
+    echo "$CLAUDE_PROJECT_DIR"
+    return 0
+  fi
+  # Fallback: walk up from CWD looking for .git
+  local dir="$PWD"
   while [[ "$dir" != "/" ]]; do
     if [[ -d "$dir/.git" || -f "$dir/.git" ]]; then
       echo "$dir"
